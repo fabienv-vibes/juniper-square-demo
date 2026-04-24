@@ -1,0 +1,373 @@
+# Concurrency Benchmark Configuration
+# Copy this file and fill in your connection details.
+
+# --- DBSQL Connection ---
+dbsql:
+  hostname: "fevm-juniper-square-demo.cloud.databricks.com"
+  http_path: "/sql/1.0/warehouses/133b52f9331b883d"
+  token: "YOUR_DATABRICKS_TOKEN"
+
+# --- Lakebase Connection ---
+lakebase:
+  host: "ep-curly-sun-d24e8bfa.database.us-east-1.cloud.databricks.com"
+  port: 5432
+  database: "juniper_serving"
+  user: "YOUR_USER"
+  password: "YOUR_TOKEN"
+  sslmode: "require"
+
+# --- Benchmark Parameters ---
+benchmark:
+  levels: [1, 2, 4, 8, 16, 32, 64]
+  iterations: 5       # measured rounds per level
+  warmup: 1           # warmup rounds (excluded from stats)
+
+# --- Delta persistence target (where benchmark_runs / benchmark_summary / benchmark_raw are written) ---
+# Writes go through the dbsql connection above. Disable per-run with --skip-delta-write.
+delta_persistence:
+  catalog: "juniper_square_demo_catalog"
+  schema: "pipeline"
+  notes: ""          # free-form notes stored on the benchmark_runs row
+
+# --- Arena ID pool ---
+# {arena_id} placeholder in each query is substituted at execution time with a
+# random choice from this pool. This simulates multi-tenant traffic.
+# Total of 100 representative arenas spread across ARN-00000 .. ARN-09999.
+arena_id_pool:
+  - "ARN-00000"
+  - "ARN-00042"
+  - "ARN-00097"
+  - "ARN-00113"
+  - "ARN-00178"
+  - "ARN-00231"
+  - "ARN-00289"
+  - "ARN-00342"
+  - "ARN-00401"
+  - "ARN-00455"
+  - "ARN-00517"
+  - "ARN-00563"
+  - "ARN-00612"
+  - "ARN-00689"
+  - "ARN-00734"
+  - "ARN-00781"
+  - "ARN-00842"
+  - "ARN-00901"
+  - "ARN-00967"
+  - "ARN-01024"
+  - "ARN-01088"
+  - "ARN-01143"
+  - "ARN-01217"
+  - "ARN-01279"
+  - "ARN-01342"
+  - "ARN-01408"
+  - "ARN-01471"
+  - "ARN-01537"
+  - "ARN-01602"
+  - "ARN-01664"
+  - "ARN-01728"
+  - "ARN-01791"
+  - "ARN-01855"
+  - "ARN-01918"
+  - "ARN-01982"
+  - "ARN-02047"
+  - "ARN-02134"
+  - "ARN-02211"
+  - "ARN-02298"
+  - "ARN-02376"
+  - "ARN-02453"
+  - "ARN-02531"
+  - "ARN-02617"
+  - "ARN-02702"
+  - "ARN-02788"
+  - "ARN-02871"
+  - "ARN-02954"
+  - "ARN-03041"
+  - "ARN-03128"
+  - "ARN-03217"
+  - "ARN-03304"
+  - "ARN-03398"
+  - "ARN-03487"
+  - "ARN-03576"
+  - "ARN-03668"
+  - "ARN-03759"
+  - "ARN-03851"
+  - "ARN-03948"
+  - "ARN-04037"
+  - "ARN-04129"
+  - "ARN-04218"
+  - "ARN-04312"
+  - "ARN-04407"
+  - "ARN-04501"
+  - "ARN-04598"
+  - "ARN-04693"
+  - "ARN-04789"
+  - "ARN-04884"
+  - "ARN-04981"
+  - "ARN-05078"
+  - "ARN-05176"
+  - "ARN-05274"
+  - "ARN-05371"
+  - "ARN-05468"
+  - "ARN-05567"
+  - "ARN-05666"
+  - "ARN-05764"
+  - "ARN-05863"
+  - "ARN-05962"
+  - "ARN-06061"
+  - "ARN-06161"
+  - "ARN-06261"
+  - "ARN-06360"
+  - "ARN-06461"
+  - "ARN-06561"
+  - "ARN-06661"
+  - "ARN-06762"
+  - "ARN-06863"
+  - "ARN-06964"
+  - "ARN-07137"
+  - "ARN-07312"
+  - "ARN-07488"
+  - "ARN-07664"
+  - "ARN-07841"
+  - "ARN-08019"
+  - "ARN-08198"
+  - "ARN-08377"
+  - "ARN-08557"
+  - "ARN-08738"
+  - "ARN-08920"
+  - "ARN-09103"
+  - "ARN-09287"
+  - "ARN-09472"
+  - "ARN-09658"
+  - "ARN-09845"
+  - "ARN-09999"
+
+# --- Queries ---
+# Each query needs a 'name' and either:
+#   - 'sql' (used for both targets), or
+#   - 'sql_dbsql' and 'sql_lakebase' (target-specific SQL)
+#
+# Optional per-query 'weight' (default 1) controls how often the query appears
+# in the round-robin rotation. Example: weight=3 => appears 3x per cycle.
+#
+# DBSQL uses Spark SQL; Lakebase uses Postgres. Key differences handled:
+#   - Date math: add_months(current_date(), -N)  vs  (current_date - interval 'N months')
+#   - ROUND on doubles: ROUND(x, N)  vs  ROUND(x::numeric, N)
+#   - Catalog prefix: juniper_square_demo_catalog.pipeline.X  vs  serving.X
+#
+# The '{arena_id}' placeholder is substituted with a random pick from
+# arena_id_pool at execution time. No SQL prepared statements are used.
+
+queries:
+  - name: "fund_performance_arena"
+    weight: 2
+    sql_dbsql: |
+      SELECT *
+      FROM juniper_square_demo_catalog.pipeline.gold_fund_performance
+      WHERE arena_id = '{arena_id}'
+      ORDER BY total_aum DESC
+    sql_lakebase: |
+      SELECT *
+      FROM serving.gold_fund_performance
+      WHERE arena_id = '{arena_id}'
+      ORDER BY total_aum DESC
+
+  - name: "gl_monthly_by_arena_year"
+    weight: 3
+    sql_dbsql: |
+      SELECT
+        category,
+        month,
+        SUM(total_amount) AS total_amount,
+        SUM(transaction_count) AS transaction_count,
+        ROUND(AVG(avg_transaction_amount), 2) AS avg_transaction_amount
+      FROM juniper_square_demo_catalog.pipeline.gold_gl_monthly_summary
+      WHERE arena_id = '{arena_id}'
+        AND month >= add_months(current_date(), -12)
+      GROUP BY category, month
+      ORDER BY month, category
+    sql_lakebase: |
+      SELECT
+        category,
+        month,
+        SUM(total_amount) AS total_amount,
+        SUM(transaction_count) AS transaction_count,
+        ROUND(AVG(avg_transaction_amount)::numeric, 2) AS avg_transaction_amount
+      FROM serving.gold_gl_monthly_summary
+      WHERE arena_id = '{arena_id}'
+        AND month >= (current_date - interval '12 months')
+      GROUP BY category, month
+      ORDER BY month, category
+
+  - name: "property_financials_joined"
+    weight: 3
+    sql_dbsql: |
+      SELECT
+        pf.property_id,
+        pf.property_name,
+        pf.property_type,
+        a.arena_name,
+        pf.fund_name,
+        pf.month,
+        pf.revenue,
+        pf.expenses,
+        pf.noi,
+        pf.occupancy_rate
+      FROM juniper_square_demo_catalog.pipeline.gold_property_financials pf
+      JOIN juniper_square_demo_catalog.pipeline.silver_arenas a
+        ON a.arena_id = pf.arena_id
+      WHERE pf.arena_id = '{arena_id}'
+        AND pf.month >= add_months(current_date(), -6)
+      ORDER BY pf.month DESC, pf.noi DESC
+      LIMIT 100
+    sql_lakebase: |
+      SELECT
+        pf.property_id,
+        pf.property_name,
+        pf.property_type,
+        a.arena_name,
+        pf.fund_name,
+        pf.month,
+        pf.revenue,
+        pf.expenses,
+        pf.noi,
+        pf.occupancy_rate
+      FROM serving.gold_property_financials pf
+      JOIN serving.silver_arenas a
+        ON a.arena_id = pf.arena_id
+      WHERE pf.arena_id = '{arena_id}'
+        AND pf.month >= (current_date - interval '6 months')
+      ORDER BY pf.month DESC, pf.noi DESC
+      LIMIT 100
+
+  - name: "top10_properties_by_revenue"
+    weight: 2
+    sql_dbsql: |
+      WITH ttm AS (
+        SELECT
+          property_id,
+          property_name,
+          property_type,
+          fund_name,
+          SUM(revenue) AS revenue_ttm,
+          SUM(noi) AS noi_ttm,
+          AVG(occupancy_rate) AS avg_occupancy
+        FROM juniper_square_demo_catalog.pipeline.gold_property_financials
+        WHERE arena_id = '{arena_id}'
+          AND month >= add_months(current_date(), -12)
+        GROUP BY property_id, property_name, property_type, fund_name
+      ),
+      ranked AS (
+        SELECT
+          ttm.*,
+          RANK() OVER (ORDER BY revenue_ttm DESC) AS revenue_rank
+        FROM ttm
+      )
+      SELECT *
+      FROM ranked
+      WHERE revenue_rank <= 10
+      ORDER BY revenue_rank
+      LIMIT 10
+    sql_lakebase: |
+      WITH ttm AS (
+        SELECT
+          property_id,
+          property_name,
+          property_type,
+          fund_name,
+          SUM(revenue) AS revenue_ttm,
+          SUM(noi) AS noi_ttm,
+          AVG(occupancy_rate) AS avg_occupancy
+        FROM serving.gold_property_financials
+        WHERE arena_id = '{arena_id}'
+          AND month >= (current_date - interval '12 months')
+        GROUP BY property_id, property_name, property_type, fund_name
+      ),
+      ranked AS (
+        SELECT
+          ttm.*,
+          RANK() OVER (ORDER BY revenue_ttm DESC) AS revenue_rank
+        FROM ttm
+      )
+      SELECT *
+      FROM ranked
+      WHERE revenue_rank <= 10
+      ORDER BY revenue_rank
+      LIMIT 10
+
+  - name: "pnl_rollup_multi_month"
+    weight: 2
+    sql_dbsql: |
+      SELECT
+        f.fund_id,
+        f.fund_name,
+        f.strategy,
+        f.vintage_year,
+        gl.month,
+        SUM(CASE WHEN gl.category = 'revenue' THEN gl.total_amount ELSE 0 END) AS revenue,
+        SUM(CASE WHEN gl.category = 'expense' THEN gl.total_amount ELSE 0 END) AS expenses,
+        SUM(CASE WHEN gl.category = 'revenue' THEN gl.total_amount ELSE 0 END)
+          - SUM(CASE WHEN gl.category = 'expense' THEN gl.total_amount ELSE 0 END) AS net_income,
+        SUM(gl.transaction_count) AS transaction_count,
+        ROUND(AVG(gl.avg_transaction_amount), 2) AS avg_txn_amount
+      FROM juniper_square_demo_catalog.pipeline.gold_gl_monthly_summary gl
+      JOIN juniper_square_demo_catalog.pipeline.silver_funds f
+        ON f.fund_id = gl.fund_id AND f.arena_id = gl.arena_id
+      WHERE gl.arena_id = '{arena_id}'
+        AND gl.month >= add_months(current_date(), -24)
+      GROUP BY f.fund_id, f.fund_name, f.strategy, f.vintage_year, gl.month
+      ORDER BY f.fund_name, gl.month
+    sql_lakebase: |
+      SELECT
+        f.fund_id,
+        f.fund_name,
+        f.strategy,
+        f.vintage_year,
+        gl.month,
+        SUM(CASE WHEN gl.category = 'revenue' THEN gl.total_amount ELSE 0 END) AS revenue,
+        SUM(CASE WHEN gl.category = 'expense' THEN gl.total_amount ELSE 0 END) AS expenses,
+        SUM(CASE WHEN gl.category = 'revenue' THEN gl.total_amount ELSE 0 END)
+          - SUM(CASE WHEN gl.category = 'expense' THEN gl.total_amount ELSE 0 END) AS net_income,
+        SUM(gl.transaction_count) AS transaction_count,
+        ROUND(AVG(gl.avg_transaction_amount)::numeric, 2) AS avg_txn_amount
+      FROM serving.gold_gl_monthly_summary gl
+      JOIN serving.silver_funds f
+        ON f.fund_id = gl.fund_id AND f.arena_id = gl.arena_id
+      WHERE gl.arena_id = '{arena_id}'
+        AND gl.month >= (current_date - interval '24 months')
+      GROUP BY f.fund_id, f.fund_name, f.strategy, f.vintage_year, gl.month
+      ORDER BY f.fund_name, gl.month
+
+  - name: "investor_commitment_summary"
+    weight: 3
+    sql_dbsql: |
+      SELECT
+        i.investor_id,
+        i.investor_name,
+        i.type,
+        i.city,
+        i.state,
+        SUM(i.commitment_amount) AS total_commitment,
+        COUNT(DISTINCT i.fund_id) AS fund_count,
+        array_agg(DISTINCT f.fund_name) AS funds
+      FROM juniper_square_demo_catalog.pipeline.silver_investors i
+      JOIN juniper_square_demo_catalog.pipeline.silver_funds f
+        ON f.fund_id = i.fund_id AND f.arena_id = i.arena_id
+      WHERE i.arena_id = '{arena_id}'
+      GROUP BY i.investor_id, i.investor_name, i.type, i.city, i.state
+      ORDER BY total_commitment DESC
+    sql_lakebase: |
+      SELECT
+        i.investor_id,
+        i.investor_name,
+        i.type,
+        i.city,
+        i.state,
+        SUM(i.commitment_amount) AS total_commitment,
+        COUNT(DISTINCT i.fund_id) AS fund_count,
+        array_agg(DISTINCT f.fund_name) AS funds
+      FROM serving.silver_investors i
+      JOIN serving.silver_funds f
+        ON f.fund_id = i.fund_id AND f.arena_id = i.arena_id
+      WHERE i.arena_id = '{arena_id}'
+      GROUP BY i.investor_id, i.investor_name, i.type, i.city, i.state
+      ORDER BY total_commitment DESC

@@ -1,0 +1,2 @@
+target,concurrency,query_name,total_queries,successful,failed,p50_ms,p95_ms,p99_ms,min_ms,max_ms,mean_ms,throughput_qps,error_rate
+dbsql,1,fund_performance_arena,2,2,0,853.3479374982562,965.0830315471467,975.015039907048,729.197832999489,977.4980419970234,853.3479374982562,2.0460399039920434,0.0

@@ -1,0 +1,519 @@
+{
+  "datasets": [
+    {
+      "name": "fund_summary",
+      "displayName": "Fund Summary",
+      "queryLines": [
+        "SELECT fund_name, strategy, total_aum, property_count, total_invested, ",
+        "current_portfolio_value, unrealized_gain_loss, investor_count, total_commitments ",
+        "FROM juniper_square_demo.pipeline.gold_fund_performance ",
+        "ORDER BY total_aum DESC"
+      ]
+    },
+    {
+      "name": "fund_kpis",
+      "displayName": "Fund KPIs",
+      "queryLines": [
+        "SELECT COUNT(*) as fund_count, ",
+        "SUM(total_aum) as total_aum, ",
+        "SUM(total_invested) as total_invested, ",
+        "SUM(current_portfolio_value) as total_portfolio_value, ",
+        "SUM(unrealized_gain_loss) as total_gain_loss, ",
+        "SUM(investor_count) as total_investors ",
+        "FROM juniper_square_demo.pipeline.gold_fund_performance"
+      ]
+    },
+    {
+      "name": "aum_by_strategy",
+      "displayName": "AUM by Strategy",
+      "queryLines": [
+        "SELECT strategy, SUM(total_aum) as total_aum, COUNT(*) as fund_count ",
+        "FROM juniper_square_demo.pipeline.gold_fund_performance ",
+        "GROUP BY strategy ",
+        "ORDER BY total_aum DESC"
+      ]
+    },
+    {
+      "name": "property_financials",
+      "displayName": "Property Financials",
+      "queryLines": [
+        "SELECT property_name, property_type, fund_name, month, ",
+        "revenue, expenses, noi, occupancy_rate ",
+        "FROM juniper_square_demo.pipeline.gold_property_financials ",
+        "ORDER BY month"
+      ]
+    },
+    {
+      "name": "noi_trend",
+      "displayName": "NOI Trend",
+      "queryLines": [
+        "SELECT month, SUM(revenue) as total_revenue, ",
+        "SUM(expenses) as total_expenses, SUM(noi) as total_noi ",
+        "FROM juniper_square_demo.pipeline.gold_property_financials ",
+        "GROUP BY month ",
+        "ORDER BY month"
+      ]
+    },
+    {
+      "name": "gl_monthly",
+      "displayName": "GL Monthly Summary",
+      "queryLines": [
+        "SELECT fund_name, category, month, total_amount, transaction_count ",
+        "FROM juniper_square_demo.pipeline.gold_gl_monthly_summary ",
+        "ORDER BY month"
+      ]
+    },
+    {
+      "name": "gl_by_category",
+      "displayName": "GL by Category",
+      "queryLines": [
+        "SELECT category, SUM(total_amount) as total_amount, ",
+        "SUM(transaction_count) as total_transactions ",
+        "FROM juniper_square_demo.pipeline.gold_gl_monthly_summary ",
+        "GROUP BY category ",
+        "ORDER BY total_amount DESC"
+      ]
+    },
+    {
+      "name": "top_properties",
+      "displayName": "Top Properties by Revenue",
+      "queryLines": [
+        "SELECT property_name, property_type, fund_name, ",
+        "SUM(revenue) as total_revenue, SUM(noi) as total_noi, ",
+        "AVG(occupancy_rate) as avg_occupancy ",
+        "FROM juniper_square_demo.pipeline.gold_property_financials ",
+        "GROUP BY property_name, property_type, fund_name ",
+        "ORDER BY total_revenue DESC ",
+        "LIMIT 15"
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "name": "fund_overview",
+      "displayName": "Fund Overview",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layout": [
+        {
+          "widget": {
+            "name": "title",
+            "multilineTextboxSpec": {
+              "lines": ["## Juniper Square: Portfolio Analytics"]
+            }
+          },
+          "position": {"x": 0, "y": 0, "width": 6, "height": 1}
+        },
+        {
+          "widget": {
+            "name": "subtitle",
+            "multilineTextboxSpec": {
+              "lines": ["Real estate investment management dashboard powered by Databricks Lakehouse"]
+            }
+          },
+          "position": {"x": 0, "y": 1, "width": 6, "height": 1}
+        },
+        {
+          "widget": {
+            "name": "kpi-total-aum",
+            "queries": [{
+              "name": "main_query",
+              "query": {
+                "datasetName": "fund_kpis",
+                "fields": [{"name": "total_aum", "expression": "`total_aum`"}],
+                "disaggregated": true
+              }
+            }],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {"fieldName": "total_aum", "displayName": "Total AUM"}
+              },
+              "frame": {"showTitle": true, "title": "Total AUM"}
+            }
+          },
+          "position": {"x": 0, "y": 2, "width": 2, "height": 3}
+        },
+        {
+          "widget": {
+            "name": "kpi-fund-count",
+            "queries": [{
+              "name": "main_query",
+              "query": {
+                "datasetName": "fund_kpis",
+                "fields": [{"name": "fund_count", "expression": "`fund_count`"}],
+                "disaggregated": true
+              }
+            }],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {"fieldName": "fund_count", "displayName": "Active Funds"}
+              },
+              "frame": {"showTitle": true, "title": "Active Funds"}
+            }
+          },
+          "position": {"x": 2, "y": 2, "width": 2, "height": 3}
+        },
+        {
+          "widget": {
+            "name": "kpi-total-investors",
+            "queries": [{
+              "name": "main_query",
+              "query": {
+                "datasetName": "fund_kpis",
+                "fields": [{"name": "total_investors", "expression": "`total_investors`"}],
+                "disaggregated": true
+              }
+            }],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {"fieldName": "total_investors", "displayName": "Total Investors"}
+              },
+              "frame": {"showTitle": true, "title": "Total Investors"}
+            }
+          },
+          "position": {"x": 4, "y": 2, "width": 2, "height": 3}
+        },
+        {
+          "widget": {
+            "name": "aum-by-strategy-chart",
+            "queries": [{
+              "name": "main_query",
+              "query": {
+                "datasetName": "aum_by_strategy",
+                "fields": [
+                  {"name": "strategy", "expression": "`strategy`"},
+                  {"name": "total_aum", "expression": "`total_aum`"}
+                ],
+                "disaggregated": true
+              }
+            }],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {"fieldName": "strategy", "scale": {"type": "categorical"}, "displayName": "Strategy"},
+                "y": {"fieldName": "total_aum", "scale": {"type": "quantitative"}, "displayName": "Total AUM"}
+              },
+              "frame": {"showTitle": true, "title": "AUM by Fund Strategy"}
+            }
+          },
+          "position": {"x": 0, "y": 5, "width": 3, "height": 5}
+        },
+        {
+          "widget": {
+            "name": "gl-by-category-pie",
+            "queries": [{
+              "name": "main_query",
+              "query": {
+                "datasetName": "gl_by_category",
+                "fields": [
+                  {"name": "category", "expression": "`category`"},
+                  {"name": "total_amount", "expression": "`total_amount`"}
+                ],
+                "disaggregated": true
+              }
+            }],
+            "spec": {
+              "version": 3,
+              "widgetType": "pie",
+              "encodings": {
+                "angle": {"fieldName": "total_amount", "displayName": "Total Amount"},
+                "color": {"fieldName": "category", "scale": {"type": "categorical"}, "displayName": "Category"}
+              },
+              "frame": {"showTitle": true, "title": "GL Spend by Category"}
+            }
+          },
+          "position": {"x": 3, "y": 5, "width": 3, "height": 5}
+        },
+        {
+          "widget": {
+            "name": "fund-table-header",
+            "multilineTextboxSpec": {
+              "lines": ["### Fund Performance Details"]
+            }
+          },
+          "position": {"x": 0, "y": 10, "width": 6, "height": 1}
+        },
+        {
+          "widget": {
+            "name": "fund-performance-table",
+            "queries": [{
+              "name": "main_query",
+              "query": {
+                "datasetName": "fund_summary",
+                "fields": [
+                  {"name": "fund_name", "expression": "`fund_name`"},
+                  {"name": "strategy", "expression": "`strategy`"},
+                  {"name": "total_aum", "expression": "`total_aum`"},
+                  {"name": "property_count", "expression": "`property_count`"},
+                  {"name": "total_invested", "expression": "`total_invested`"},
+                  {"name": "current_portfolio_value", "expression": "`current_portfolio_value`"},
+                  {"name": "unrealized_gain_loss", "expression": "`unrealized_gain_loss`"},
+                  {"name": "investor_count", "expression": "`investor_count`"}
+                ],
+                "disaggregated": true
+              }
+            }],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {"fieldName": "fund_name", "displayName": "Fund"},
+                  {"fieldName": "strategy", "displayName": "Strategy"},
+                  {"fieldName": "total_aum", "displayName": "AUM"},
+                  {"fieldName": "property_count", "displayName": "Properties"},
+                  {"fieldName": "total_invested", "displayName": "Invested"},
+                  {"fieldName": "current_portfolio_value", "displayName": "Current Value"},
+                  {"fieldName": "unrealized_gain_loss", "displayName": "Gain/Loss"},
+                  {"fieldName": "investor_count", "displayName": "Investors"}
+                ]
+              },
+              "frame": {"showTitle": true, "title": "Fund Performance"}
+            }
+          },
+          "position": {"x": 0, "y": 11, "width": 6, "height": 6}
+        }
+      ]
+    },
+    {
+      "name": "property_financials_page",
+      "displayName": "Property Financials",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layout": [
+        {
+          "widget": {
+            "name": "prop-title",
+            "multilineTextboxSpec": {
+              "lines": ["## Property Financial Performance"]
+            }
+          },
+          "position": {"x": 0, "y": 0, "width": 6, "height": 1}
+        },
+        {
+          "widget": {
+            "name": "noi-trend-chart",
+            "queries": [{
+              "name": "main_query",
+              "query": {
+                "datasetName": "noi_trend",
+                "fields": [
+                  {"name": "month", "expression": "`month`"},
+                  {"name": "total_revenue", "expression": "`total_revenue`"},
+                  {"name": "total_expenses", "expression": "`total_expenses`"},
+                  {"name": "total_noi", "expression": "`total_noi`"}
+                ],
+                "disaggregated": true
+              }
+            }],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "encodings": {
+                "x": {"fieldName": "month", "scale": {"type": "temporal"}, "displayName": "Month"},
+                "y": {
+                  "scale": {"type": "quantitative"},
+                  "fields": [
+                    {"fieldName": "total_revenue", "displayName": "Revenue"},
+                    {"fieldName": "total_expenses", "displayName": "Expenses"},
+                    {"fieldName": "total_noi", "displayName": "NOI"}
+                  ]
+                }
+              },
+              "frame": {"showTitle": true, "title": "Revenue, Expenses & NOI Trend"}
+            }
+          },
+          "position": {"x": 0, "y": 1, "width": 6, "height": 6}
+        },
+        {
+          "widget": {
+            "name": "top-properties-header",
+            "multilineTextboxSpec": {
+              "lines": ["### Top Properties by Revenue"]
+            }
+          },
+          "position": {"x": 0, "y": 7, "width": 6, "height": 1}
+        },
+        {
+          "widget": {
+            "name": "top-properties-table",
+            "queries": [{
+              "name": "main_query",
+              "query": {
+                "datasetName": "top_properties",
+                "fields": [
+                  {"name": "property_name", "expression": "`property_name`"},
+                  {"name": "property_type", "expression": "`property_type`"},
+                  {"name": "fund_name", "expression": "`fund_name`"},
+                  {"name": "total_revenue", "expression": "`total_revenue`"},
+                  {"name": "total_noi", "expression": "`total_noi`"},
+                  {"name": "avg_occupancy", "expression": "`avg_occupancy`"}
+                ],
+                "disaggregated": true
+              }
+            }],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {"fieldName": "property_name", "displayName": "Property"},
+                  {"fieldName": "property_type", "displayName": "Type"},
+                  {"fieldName": "fund_name", "displayName": "Fund"},
+                  {"fieldName": "total_revenue", "displayName": "Total Revenue"},
+                  {"fieldName": "total_noi", "displayName": "Total NOI"},
+                  {"fieldName": "avg_occupancy", "displayName": "Avg Occupancy"}
+                ]
+              },
+              "frame": {"showTitle": true, "title": "Top Properties"}
+            }
+          },
+          "position": {"x": 0, "y": 8, "width": 6, "height": 6}
+        }
+      ]
+    },
+    {
+      "name": "gl_explorer",
+      "displayName": "GL Explorer",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layout": [
+        {
+          "widget": {
+            "name": "gl-title",
+            "multilineTextboxSpec": {
+              "lines": ["## General Ledger Explorer"]
+            }
+          },
+          "position": {"x": 0, "y": 0, "width": 6, "height": 1}
+        },
+        {
+          "widget": {
+            "name": "gl-subtitle",
+            "multilineTextboxSpec": {
+              "lines": ["Monthly GL transaction summary across all funds, 2M+ transactions"]
+            }
+          },
+          "position": {"x": 0, "y": 1, "width": 6, "height": 1}
+        },
+        {
+          "widget": {
+            "name": "gl-spend-trend",
+            "queries": [{
+              "name": "main_query",
+              "query": {
+                "datasetName": "gl_monthly",
+                "fields": [
+                  {"name": "monthly(month)", "expression": "DATE_TRUNC(\"MONTH\", `month`)"},
+                  {"name": "sum(total_amount)", "expression": "SUM(`total_amount`)"},
+                  {"name": "category", "expression": "`category`"}
+                ],
+                "disaggregated": false
+              }
+            }],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {"fieldName": "monthly(month)", "scale": {"type": "temporal"}, "displayName": "Month"},
+                "y": {"fieldName": "sum(total_amount)", "scale": {"type": "quantitative"}, "displayName": "Amount"},
+                "color": {"fieldName": "category", "scale": {"type": "categorical"}, "displayName": "Category"}
+              },
+              "frame": {"showTitle": true, "title": "Monthly Spend by Category"}
+            }
+          },
+          "position": {"x": 0, "y": 2, "width": 6, "height": 6}
+        },
+        {
+          "widget": {
+            "name": "gl-volume-trend",
+            "queries": [{
+              "name": "main_query",
+              "query": {
+                "datasetName": "gl_monthly",
+                "fields": [
+                  {"name": "monthly(month)", "expression": "DATE_TRUNC(\"MONTH\", `month`)"},
+                  {"name": "sum(transaction_count)", "expression": "SUM(`transaction_count`)"}
+                ],
+                "disaggregated": false
+              }
+            }],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "encodings": {
+                "x": {"fieldName": "monthly(month)", "scale": {"type": "temporal"}, "displayName": "Month"},
+                "y": {"fieldName": "sum(transaction_count)", "scale": {"type": "quantitative"}, "displayName": "Transactions"}
+              },
+              "frame": {"showTitle": true, "title": "Transaction Volume Trend"}
+            }
+          },
+          "position": {"x": 0, "y": 8, "width": 6, "height": 5}
+        }
+      ]
+    },
+    {
+      "name": "filters",
+      "displayName": "Filters",
+      "pageType": "PAGE_TYPE_GLOBAL_FILTERS",
+      "layout": [
+        {
+          "widget": {
+            "name": "filter-fund",
+            "queries": [{
+              "name": "ds_fund_filter",
+              "query": {
+                "datasetName": "gl_monthly",
+                "fields": [{"name": "fund_name", "expression": "`fund_name`"}],
+                "disaggregated": false
+              }
+            }],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "encodings": {
+                "fields": [{
+                  "fieldName": "fund_name",
+                  "displayName": "Fund",
+                  "queryName": "ds_fund_filter"
+                }]
+              },
+              "frame": {"showTitle": true, "title": "Fund"}
+            }
+          },
+          "position": {"x": 0, "y": 0, "width": 2, "height": 2}
+        },
+        {
+          "widget": {
+            "name": "filter-strategy",
+            "queries": [{
+              "name": "ds_strategy_filter",
+              "query": {
+                "datasetName": "fund_summary",
+                "fields": [{"name": "strategy", "expression": "`strategy`"}],
+                "disaggregated": false
+              }
+            }],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "encodings": {
+                "fields": [{
+                  "fieldName": "strategy",
+                  "displayName": "Strategy",
+                  "queryName": "ds_strategy_filter"
+                }]
+              },
+              "frame": {"showTitle": true, "title": "Strategy"}
+            }
+          },
+          "position": {"x": 2, "y": 0, "width": 2, "height": 2}
+        }
+      ]
+    }
+  ]
+}

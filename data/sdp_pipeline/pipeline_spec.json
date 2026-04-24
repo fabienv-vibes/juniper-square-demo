@@ -1,0 +1,33 @@
+{
+  "name": "juniper_benchmark_medallion",
+  "edition": "ADVANCED",
+  "catalog": "juniper_square_demo_catalog",
+  "target": "pipeline",
+  "serverless": true,
+  "photon": true,
+  "development": true,
+  "continuous": false,
+  "channel": "CURRENT",
+  "libraries": [
+    {
+      "notebook": {
+        "path": "/Users/fabien.vaucheret@databricks.com/juniper_benchmark/sdp/bronze_ingestion"
+      }
+    },
+    {
+      "notebook": {
+        "path": "/Users/fabien.vaucheret@databricks.com/juniper_benchmark/sdp/silver_transformations"
+      }
+    },
+    {
+      "notebook": {
+        "path": "/Users/fabien.vaucheret@databricks.com/juniper_benchmark/sdp/gold_aggregations"
+      }
+    }
+  ],
+  "configuration": {
+    "pipelines.autoOptimize.managed": "true",
+    "pipelines.enableTrackHistory": "true",
+    "raw_data_path": "/Volumes/juniper_square_demo_catalog/raw/landing"
+  }
+}

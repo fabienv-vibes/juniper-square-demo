@@ -1,0 +1,3 @@
+query_name,target,concurrency,iteration,thread_id,latency_ms,success,error
+fund_performance_arena,dbsql,1,0,0,-1,False,Error during request to server: : Credential was not sent or was of an unsupported type for this API.. 
+fund_performance_arena,dbsql,1,1,0,-1,False,Error during request to server: : Credential was not sent or was of an unsupported type for this API.. 

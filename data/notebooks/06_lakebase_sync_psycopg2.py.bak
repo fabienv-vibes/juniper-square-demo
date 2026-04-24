@@ -1,0 +1,409 @@
+# Databricks notebook source
+
+# MAGIC %md
+# MAGIC # Lakebase Autoscale Sync: Gold Tables for Concurrency Benchmark
+# MAGIC
+# MAGIC Syncs the four benchmark gold tables from `juniper_square_demo_catalog.pipeline` into a
+# MAGIC Lakebase Autoscale project so the Streamlit benchmark harness can hammer Postgres directly
+# MAGIC and compare concurrency/latency against DBSQL.
+# MAGIC
+# MAGIC **Approach:** psycopg2 `COPY FROM STDIN` bulk load against a fresh short-lived OAuth token
+# MAGIC per table. Chosen over managed synced tables because:
+# MAGIC - Deterministic row counts and write timing (critical for calibrating the benchmark matrix)
+# MAGIC - No dependency on a separate Lakeflow sync pipeline warming up
+# MAGIC - Full control of Postgres schema, types, and indexes
+# MAGIC - `COPY FROM STDIN` is the fastest bulk-load path (≈10-50x faster than executemany)
+# MAGIC
+# MAGIC The notebook is **idempotent**: it drops + recreates each target table each run (full refresh)
+# MAGIC or appends with upsert-by-PK (incremental). Missing source tables are skipped with a warning
+# MAGIC so this can run before the SDP pipeline has materialized every table.
+
+# COMMAND ----------
+
+# MAGIC %pip install -U "databricks-sdk>=0.81.0" "psycopg2-binary>=2.9" -q
+# MAGIC dbutils.library.restartPython()
+
+# COMMAND ----------
+
+# Widgets
+dbutils.widgets.text("lakebase_project", "juniper-sq-benchmark", "Lakebase project id")
+dbutils.widgets.text("lakebase_database", "juniper_serving", "Lakebase database")
+dbutils.widgets.text("lakebase_schema", "serving", "Lakebase target schema")
+dbutils.widgets.text("catalog", "juniper_square_demo_catalog", "UC catalog")
+dbutils.widgets.text("source_schema", "pipeline", "UC source schema")
+dbutils.widgets.dropdown("mode", "full_refresh", ["full_refresh", "incremental"], "Sync mode")
+
+LAKEBASE_PROJECT = dbutils.widgets.get("lakebase_project")
+LAKEBASE_DATABASE = dbutils.widgets.get("lakebase_database")
+LAKEBASE_SCHEMA = dbutils.widgets.get("lakebase_schema")
+CATALOG = dbutils.widgets.get("catalog")
+SOURCE_SCHEMA = dbutils.widgets.get("source_schema")
+MODE = dbutils.widgets.get("mode")
+
+print(f"Project:   {LAKEBASE_PROJECT}")
+print(f"Database:  {LAKEBASE_DATABASE}")
+print(f"Schema:    {LAKEBASE_SCHEMA}")
+print(f"Source:    {CATALOG}.{SOURCE_SCHEMA}")
+print(f"Mode:      {MODE}")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Table specs
+# MAGIC
+# MAGIC Each entry declares: source table, primary key(s), Postgres DDL, copy column order,
+# MAGIC extra indexes. Keep these synchronized with the gold layer schema in the SDP pipeline.
+
+# COMMAND ----------
+
+TABLE_SPECS = {
+    "gold_arena_overview": {
+        "pk": ["arena_id"],
+        "columns": [
+            ("arena_id",          "TEXT"),
+            ("arena_name",        "TEXT"),
+            ("tier",              "TEXT"),
+            ("total_aum",         "DOUBLE PRECISION"),
+            ("total_properties",  "BIGINT"),
+            ("total_investors",   "BIGINT"),
+            ("total_commitments", "DOUBLE PRECISION"),
+            ("total_revenue_ltm", "DOUBLE PRECISION"),
+            ("total_noi_ltm",     "DOUBLE PRECISION"),
+        ],
+        "indexes": [
+            # arena_id is already the PK so it gets a unique index for free.
+        ],
+    },
+    "gold_fund_performance": {
+        "pk": ["fund_id"],
+        "columns": [
+            ("fund_id",                 "TEXT"),
+            ("arena_id",                "TEXT"),
+            ("fund_name",               "TEXT"),
+            ("strategy",                "TEXT"),
+            ("property_count",          "BIGINT"),
+            ("total_invested",          "DOUBLE PRECISION"),
+            ("current_portfolio_value", "DOUBLE PRECISION"),
+            ("unrealized_gain_loss",    "DOUBLE PRECISION"),
+            ("investor_count",          "BIGINT"),
+            ("total_commitments",       "DOUBLE PRECISION"),
+            ("aum",                     "DOUBLE PRECISION"),
+        ],
+        "indexes": [
+            ("ix_fund_perf_arena", "(arena_id)"),
+        ],
+    },
+    "gold_property_financials": {
+        # property+month is the grain; use a composite PK for idempotent upsert
+        "pk": ["property_id", "month"],
+        "columns": [
+            ("property_id",     "TEXT"),
+            ("property_name",   "TEXT"),
+            ("property_type",   "TEXT"),
+            ("arena_id",        "TEXT"),
+            ("fund_id",         "TEXT"),
+            ("fund_name",       "TEXT"),
+            ("month",           "DATE"),
+            ("revenue",         "DOUBLE PRECISION"),
+            ("expenses",        "DOUBLE PRECISION"),
+            ("noi",             "DOUBLE PRECISION"),
+            ("occupancy_rate",  "DOUBLE PRECISION"),
+        ],
+        "indexes": [
+            ("ix_prop_fin_arena",       "(arena_id)"),
+            ("ix_prop_fin_arena_month", "(arena_id, month)"),
+            ("ix_prop_fin_fund",        "(fund_id)"),
+        ],
+    },
+    "gold_gl_monthly_summary": {
+        # arena+fund+month+category is the grain
+        "pk": ["arena_id", "fund_id", "month", "category"],
+        "columns": [
+            ("arena_id",               "TEXT"),
+            ("fund_id",                "TEXT"),
+            ("fund_name",              "TEXT"),
+            ("category",               "TEXT"),
+            ("month",                  "DATE"),
+            ("total_amount",           "DOUBLE PRECISION"),
+            ("transaction_count",      "BIGINT"),
+            ("avg_transaction_amount", "DOUBLE PRECISION"),
+        ],
+        "indexes": [
+            ("ix_gl_arena",       "(arena_id)"),
+            ("ix_gl_arena_month", "(arena_id, month)"),
+            ("ix_gl_fund",        "(fund_id)"),
+        ],
+    },
+}
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Lakebase connection helpers
+# MAGIC
+# MAGIC Tokens are 1-hour OAuth tokens from `w.postgres.generate_database_credential()`. A single
+# MAGIC sync of all four tables at benchmark scale (~50K + property×month + gl×month) completes well
+# MAGIC under an hour, so we fetch a fresh token once at the top and refresh per-table as a safety
+# MAGIC net. If a run spans >1h (e.g. retried 10TB refresh), tokens get regenerated automatically.
+
+# COMMAND ----------
+
+import time
+from databricks.sdk import WorkspaceClient
+import psycopg2
+from psycopg2 import sql
+
+_w = WorkspaceClient()
+
+def _endpoint_name():
+    """Pick the first endpoint on the production branch (the primary R/W endpoint)."""
+    parent = f"projects/{LAKEBASE_PROJECT}/branches/production"
+    endpoints = list(_w.postgres.list_endpoints(parent=parent))
+    if not endpoints:
+        raise RuntimeError(f"No endpoints found under {parent}")
+    return endpoints[0].name
+
+_EP_NAME = _endpoint_name()
+_EP = _w.postgres.get_endpoint(name=_EP_NAME)
+_HOST = _EP.status.hosts.host
+
+# SP-based service principal runs use the SP's UUID as the pg role; interactive runs use the
+# caller's workspace username. Both are valid Postgres roles Lakebase provisions automatically.
+_USER = _w.current_user.me().user_name
+
+print(f"Endpoint: {_EP_NAME}")
+print(f"Host:     {_HOST}")
+print(f"User:     {_USER}")
+
+def get_connection():
+    """Open a fresh psycopg2 connection with a freshly minted OAuth token."""
+    cred = _w.postgres.generate_database_credential(endpoint=_EP_NAME)
+    conn = psycopg2.connect(
+        host=_HOST,
+        dbname=LAKEBASE_DATABASE,
+        user=_USER,
+        password=cred.token,
+        sslmode="require",
+        connect_timeout=30,
+    )
+    conn.autocommit = False
+    return conn
+
+# Smoke test: confirm we can reach the endpoint and the database exists
+try:
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT version(), current_database(), current_user")
+            v, db, u = cur.fetchone()
+            print(f"Connected: {v.split(',')[0]} / db={db} / user={u}")
+except Exception as e:
+    # If LAKEBASE_DATABASE doesn't exist yet, create it via the default db, then retry
+    msg = str(e)
+    if "does not exist" in msg and LAKEBASE_DATABASE:
+        print(f"Database '{LAKEBASE_DATABASE}' not found — creating via databricks_postgres")
+        cred = _w.postgres.generate_database_credential(endpoint=_EP_NAME)
+        bootstrap = psycopg2.connect(
+            host=_HOST, dbname="databricks_postgres", user=_USER,
+            password=cred.token, sslmode="require", connect_timeout=30,
+        )
+        bootstrap.autocommit = True
+        with bootstrap.cursor() as cur:
+            cur.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(LAKEBASE_DATABASE)))
+        bootstrap.close()
+        print(f"Created database {LAKEBASE_DATABASE}")
+    else:
+        raise
+
+# COMMAND ----------
+
+# Ensure target schema exists
+with get_connection() as conn:
+    with conn.cursor() as cur:
+        cur.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(LAKEBASE_SCHEMA)))
+    conn.commit()
+print(f"Schema ready: {LAKEBASE_SCHEMA}")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## DDL + sync helpers
+
+# COMMAND ----------
+
+def _source_exists(table: str) -> bool:
+    """Check the Delta source is materialized before we try to read it."""
+    try:
+        return spark.catalog.tableExists(f"{CATALOG}.{SOURCE_SCHEMA}.{table}")
+    except Exception:
+        return False
+
+def _build_ddl(table: str, spec: dict) -> str:
+    cols_sql = ",\n    ".join(f'"{c}" {t}' for c, t in spec["columns"])
+    pk_sql = ", ".join(f'"{c}"' for c in spec["pk"])
+    return (
+        f'CREATE TABLE IF NOT EXISTS "{LAKEBASE_SCHEMA}"."{table}" (\n'
+        f'    {cols_sql},\n'
+        f'    PRIMARY KEY ({pk_sql})\n'
+        f')'
+    )
+
+def _index_ddls(table: str, spec: dict) -> list[str]:
+    ddls = []
+    for idx_name, cols_expr in spec.get("indexes", []):
+        ddls.append(
+            f'CREATE INDEX IF NOT EXISTS {idx_name} '
+            f'ON "{LAKEBASE_SCHEMA}"."{table}" {cols_expr}'
+        )
+    return ddls
+
+def _ensure_table(conn, table: str, spec: dict):
+    with conn.cursor() as cur:
+        if MODE == "full_refresh":
+            # Drop so schema drift in gold layer can't break the load
+            cur.execute(
+                sql.SQL('DROP TABLE IF EXISTS {}.{} CASCADE').format(
+                    sql.Identifier(LAKEBASE_SCHEMA), sql.Identifier(table)
+                )
+            )
+        cur.execute(_build_ddl(table, spec))
+        for idx_ddl in _index_ddls(table, spec):
+            cur.execute(idx_ddl)
+    conn.commit()
+
+# COMMAND ----------
+
+def _spark_to_pg_rows(df, col_names):
+    """Yield tuples in the declared column order. Convert date/numeric as needed."""
+    # toLocalIterator streams without collecting to driver
+    for row in df.select(*col_names).toLocalIterator():
+        yield tuple(row[c] for c in col_names)
+
+def _copy_from(conn, table: str, col_names: list[str], df):
+    """Bulk load a DataFrame into Lakebase using COPY FROM STDIN (CSV)."""
+    import csv, io
+
+    # Buffered writer: batch ~50K rows per flush to keep driver memory modest
+    BATCH = 50_000
+    col_sql = ", ".join(f'"{c}"' for c in col_names)
+    copy_sql = (
+        f'COPY "{LAKEBASE_SCHEMA}"."{table}" ({col_sql}) '
+        f"FROM STDIN WITH (FORMAT csv, NULL '\\N')"
+    )
+
+    total = 0
+    buf = io.StringIO()
+    writer = csv.writer(buf, quoting=csv.QUOTE_MINIMAL)
+    iterator = _spark_to_pg_rows(df, col_names)
+
+    with conn.cursor() as cur:
+        def flush():
+            nonlocal buf, writer
+            buf.seek(0)
+            cur.copy_expert(copy_sql, buf)
+            buf = io.StringIO()
+            writer = csv.writer(buf, quoting=csv.QUOTE_MINIMAL)
+
+        count_in_batch = 0
+        for row in iterator:
+            # psycopg2 CSV needs \N for NULL; convert None explicitly
+            writer.writerow(["\\N" if v is None else v for v in row])
+            count_in_batch += 1
+            total += 1
+            if count_in_batch >= BATCH:
+                flush()
+                count_in_batch = 0
+        if count_in_batch:
+            flush()
+    conn.commit()
+    return total
+
+# COMMAND ----------
+
+def sync_table(table: str, spec: dict):
+    """Full pipeline for one table: verify source, (re)create target, COPY, verify counts."""
+    print(f"\n=== {table} ===")
+    if not _source_exists(table):
+        print(f"⚠️  skipping {table} — source table not found at {CATALOG}.{SOURCE_SCHEMA}")
+        return {"table": table, "status": "skipped", "delta_rows": 0, "pg_rows": 0}
+
+    src_fqn = f"{CATALOG}.{SOURCE_SCHEMA}.{table}"
+    col_names = [c for c, _ in spec["columns"]]
+    df = spark.table(src_fqn).select(*col_names)
+    delta_count = df.count()
+    print(f"Delta rows: {delta_count:,}")
+
+    # Fresh connection = fresh token, handles multi-hour runs cleanly
+    with get_connection() as conn:
+        _ensure_table(conn, table, spec)
+        t0 = time.time()
+        loaded = _copy_from(conn, table, col_names, df)
+        elapsed = time.time() - t0
+        print(f"COPY loaded {loaded:,} rows in {elapsed:.1f}s ({loaded / max(elapsed, 0.001):,.0f} rows/s)")
+
+        # Post-load ANALYZE for the query planner
+        with conn.cursor() as cur:
+            cur.execute(f'ANALYZE "{LAKEBASE_SCHEMA}"."{table}"')
+        conn.commit()
+
+        # Verify round-trip count
+        with conn.cursor() as cur:
+            cur.execute(f'SELECT COUNT(*) FROM "{LAKEBASE_SCHEMA}"."{table}"')
+            pg_count = cur.fetchone()[0]
+
+    if pg_count != delta_count:
+        raise RuntimeError(
+            f"Row count mismatch for {table}: delta={delta_count:,} lakebase={pg_count:,}"
+        )
+    print(f"✅ {table}: delta={delta_count:,} == lakebase={pg_count:,}")
+    return {"table": table, "status": "ok", "delta_rows": delta_count, "pg_rows": pg_count}
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Run the sync
+
+# COMMAND ----------
+
+results = []
+for table_name, spec in TABLE_SPECS.items():
+    try:
+        results.append(sync_table(table_name, spec))
+    except Exception as e:
+        print(f"❌ {table_name} failed: {e}")
+        results.append({"table": table_name, "status": f"error: {e}", "delta_rows": 0, "pg_rows": 0})
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Summary
+
+# COMMAND ----------
+
+from pyspark.sql import Row
+
+summary_df = spark.createDataFrame([Row(**r) for r in results])
+display(summary_df)
+
+failed = [r for r in results if r["status"].startswith("error")]
+if failed:
+    raise RuntimeError(f"{len(failed)} table(s) failed: {[r['table'] for r in failed]}")
+
+print(f"\n✅ Sync complete. {sum(1 for r in results if r['status']=='ok')} ok, "
+      f"{sum(1 for r in results if r['status']=='skipped')} skipped.")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Notes
+# MAGIC
+# MAGIC - **Service principal role:** assumes the caller's Databricks identity (user or SP) is the
+# MAGIC   Postgres role. Lakebase auto-provisions roles for workspace users and SPs on first connect;
+# MAGIC   no manual `CREATE ROLE` needed. If run as an SP, the role name will be the SP UUID.
+# MAGIC - **Token refresh:** each call to `get_connection()` mints a fresh 1h OAuth token. With four
+# MAGIC   tables and fresh connections per table, we never hold a connection past token expiry.
+# MAGIC - **Incremental mode:** today this reloads primary-key conflicts via plain COPY which will
+# MAGIC   error on duplicates. For true upsert, stage into a temp table and `INSERT ... ON CONFLICT
+# MAGIC   (pk) DO UPDATE`. Safe fallback: run in `full_refresh` between benchmark runs.
+# MAGIC - **Alternative (synced tables):** for a continuously updated serving layer, swap the COPY
+# MAGIC   loop for `w.database.create_synced_database_table(...)` in `TRIGGERED` mode. Requires CDF
+# MAGIC   on source tables and a storage catalog for the sync pipeline staging.

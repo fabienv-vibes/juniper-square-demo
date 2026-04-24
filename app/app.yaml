@@ -1,0 +1,27 @@
+command:
+  - "streamlit"
+  - "run"
+  - "app.py"
+  - "--server.port=8000"
+  - "--server.address=0.0.0.0"
+  - "--server.enableCORS=false"
+  - "--server.enableXsrfProtection=false"
+
+env:
+  - name: DATABRICKS_WAREHOUSE_ID
+    value: "133b52f9331b883d"
+  - name: DATABRICKS_CATALOG
+    value: "juniper_square_demo_catalog"
+  - name: DATABRICKS_SCHEMA
+    value: "pipeline"
+  - name: STREAMLIT_SERVER_HEADLESS
+    value: "true"
+  - name: STREAMLIT_BROWSER_GATHER_USAGE_STATS
+    value: "false"
+
+resources:
+  - name: benchmark-warehouse
+    description: "Serverless Starter warehouse for benchmark queries"
+    sql_warehouse:
+      id: "133b52f9331b883d"
+      permission: "CAN_USE"

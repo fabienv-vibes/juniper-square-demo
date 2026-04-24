@@ -1,0 +1,139 @@
+{
+  "name": "databricks",
+  "version": "1.1.0",
+  "source": "brand.databricks.com (official Corporate palette) + databricks-slides (GTM/Field variant)",
+  "palette_note": "The primary palette below is the official Corporate brand palette from https://brand.databricks.com. A GTM/Field variant (used in databricks-slides, markdown-to-pdf) is included at palette_variants.field for back-compat with existing branded artifacts.",
+  "color": {
+    "brand": {
+      "lava_600":      { "hex": "#FF3621", "rgb": [255, 54, 33],   "cmyk": "C0 M91 Y93 K0",   "role": "PRIMARY — 10% accent ONLY. CTAs, highlights, focus ring, Spark mark." },
+      "navy_900":      { "hex": "#0B2026", "rgb": [11, 32, 38],    "cmyk": "C86 M67 Y61 K71", "role": "Primary text, navbar, dark surfaces" },
+      "oat_medium":    { "hex": "#EEEDE9", "rgb": [238, 237, 233], "cmyk": "C6 M4 Y6 K0",     "role": "Subtle background tint, card surface on light" },
+      "oat_light":     { "hex": "#F9F7F4", "rgb": [249, 247, 244], "cmyk": "C1 M2 Y2 K0",     "role": "Default background (light theme)" },
+      "white":         { "hex": "#FFFFFF", "rgb": [255, 255, 255],                             "role": "Clean surface, elevated cards on Oat" }
+    },
+    "semantic": {
+      "success":       { "hex": "#00A972", "role": "Confirmations, positive state" },
+      "warning":       { "hex": "#FBB300", "role": "Caution, soft degradation" },
+      "error":         { "hex": "#FF3621", "role": "Shares Lava 600 — disambiguate with icon/badge context" },
+      "info":          { "hex": "#4462C9", "role": "Informational accents, links" }
+    },
+    "neutral": {
+      "900":           "#0B2026",
+      "700":           "#4A5568",
+      "500":           "#A0AEC0",
+      "300":           "#CBD5E0",
+      "100":           "#EEEDE9",
+      "50":            "#F9F7F4",
+      "white":         "#FFFFFF",
+      "border":        "#C4CCD6"
+    },
+    "extended": {
+      "note":          "Secondary tones for reports, extended data-viz. Use only when the primary palette isn't enough.",
+      "dark_mid":      "#143D4A",
+      "teal":          "#1B5162",
+      "teal_muted":    "#618794",
+      "deep_navy":     "#003159",
+      "rose":          "#98102A",
+      "amber":         "#FFAB00",
+      "orange_sec":    "#FF7033"
+    },
+    "theme": {
+      "light": {
+        "bg":              "#F9F7F4",
+        "bg_subtle":       "#EEEDE9",
+        "surface":         "#FFFFFF",
+        "text_primary":    "#0B2026",
+        "text_secondary":  "#4A5568",
+        "border":          "#C4CCD6",
+        "accent":          "#FF3621"
+      },
+      "dark": {
+        "bg":              "#0B2026",
+        "bg_subtle":       "#143D4A",
+        "surface":         "#1B5162",
+        "text_primary":    "#FFFFFF",
+        "text_secondary":  "#E5E7EB",
+        "border":          "#4A5568",
+        "accent":          "#FF3621",
+        "accent_alt":      "#FF5A47"
+      }
+    },
+    "chart": {
+      "categorical":          ["#FF3621", "#4462C9", "#00A972", "#FBB300", "#FF7033", "#003159", "#A0AEC0", "#0B2026"],
+      "sequential_lava":      ["#F9F7F4", "#FFDDD8", "#FFB8AD", "#FF9482", "#FF7057", "#FF4C2C", "#FF3621", "#CC2B1A"],
+      "diverging_navy_lava":  ["#003159", "#1A5A7F", "#4A8AB5", "#A0C4D9", "#FFD4CC", "#FF9482", "#FF5C3D", "#FF3621"]
+    },
+    "palette_variants": {
+      "field": {
+        "note": "GTM / Field variant used by databricks-slides and markdown-to-pdf. Use when producing artifacts that must match existing Databricks field-facing decks and PDF reports.",
+        "lava_600":   "#FF3621",
+        "navy":       "#1B3139",
+        "oat":        "#F5F3F0"
+      }
+    }
+  },
+  "typography": {
+    "fonts": {
+      "primary": {
+        "family":   "DM Sans",
+        "weights":  [400, 500, 700],
+        "fallback": "ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
+        "cdn":      "https://fonts.googleapis.com/css2?family=DM+Sans:ital,wght@0,400;0,500;0,700;1,400&display=swap",
+        "source":   "brand.databricks.com — official primary font"
+      },
+      "mono": {
+        "family":   "DM Mono",
+        "weights":  [400, 500],
+        "fallback": "ui-monospace, SFMono-Regular, Menlo, Monaco, monospace",
+        "cdn":      "https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&display=swap",
+        "source":   "brand.databricks.com — official monospace, used for code depictions"
+      }
+    },
+    "scale_web": {
+      "h1":    { "size_px": 48, "line": 1.2, "weight": 700, "letter_spacing": "-0.02em" },
+      "h2":    { "size_px": 36, "line": 1.3, "weight": 700, "letter_spacing": "-0.01em" },
+      "h3":    { "size_px": 24, "line": 1.4, "weight": 700 },
+      "h4":    { "size_px": 18, "line": 1.5, "weight": 700 },
+      "body":  { "size_px": 16, "line": 1.6, "weight": 400 },
+      "small": { "size_px": 14, "line": 1.5, "weight": 400 },
+      "code":  { "size_px": 14, "line": 1.6, "weight": 400, "family": "DM Mono" }
+    },
+    "scale_slides_pt": {
+      "title_slide_title":   { "size": 48, "weight": 700 },
+      "closing_slide_title": { "size": 54, "weight": 700 },
+      "agenda_title":        { "size": 40, "weight": 700 },
+      "slide_title":         { "size": 36, "weight": 700 },
+      "subtitle":            { "size": 24, "weight": 400 },
+      "body_large":          { "size": 28, "weight": 400 },
+      "body":                { "size": 22, "weight": 400 },
+      "body_small":          { "size": 20, "weight": 400 },
+      "caption":             { "size": 18, "weight": 700 },
+      "footer":              { "size": 12, "weight": 400 }
+    }
+  },
+  "spacing": {
+    "base": 8,
+    "scale": { "xs": 4, "sm": 8, "md": 16, "lg": 24, "xl": 32, "2xl": 48, "3xl": 64 }
+  },
+  "radius": { "none": 0, "sm": 4, "md": 8, "lg": 12, "full": 9999, "card": 12 },
+  "elevation": {
+    "sm": "0 1px 2px 0 rgba(0, 0, 0, 0.05)",
+    "md": "0 4px 6px -1px rgba(0, 0, 0, 0.1)",
+    "lg": "0 10px 15px -3px rgba(0, 0, 0, 0.1)",
+    "xl": "0 20px 25px -5px rgba(0, 0, 0, 0.1)"
+  },
+  "motion": {
+    "duration_ms": { "instant": 100, "fast": 150, "state": 250, "layout": 400, "entrance": 600 },
+    "easing": {
+      "out_quart": "cubic-bezier(0.25, 1, 0.5, 1)",
+      "out_quint": "cubic-bezier(0.22, 1, 0.36, 1)",
+      "out_expo":  "cubic-bezier(0.16, 1, 0.3, 1)"
+    }
+  },
+  "assets": {
+    "brand_portal":  "https://brand.databricks.com",
+    "brandfolder":   "https://brandfolder.com/portals/databricks",
+    "du_bois":       "https://ui-infra.dev.databricks.com/storybook/js/packages/du-bois/",
+    "logo_svg_pack": "assets/logos/"
+  }
+}

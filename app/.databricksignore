@@ -1,0 +1,8 @@
+.venv
+__pycache__
+*.pyc
+.databricks
+.skills
+mock_data
+.streamlit/secrets.toml
+.git
