@@ -134,7 +134,7 @@ PILLARS: List[Pillar] = [
             "chain-of-custody. The patterns are available today; workflow automation "
             "is the glue layer on top."
         ),
-        has_live_drill_in=False,
+        has_live_drill_in=True,
         drill_page="provenance",
     ),
     Pillar(
@@ -158,7 +158,7 @@ PILLARS: List[Pillar] = [
             "your behalf. Clean Rooms enables zero-copy cross-org data sharing. "
             "Anomaly detection on system.access.audit surfaces suspicious access patterns."
         ),
-        has_live_drill_in=False,
+        has_live_drill_in=True,
         drill_page="security",
     ),
     Pillar(

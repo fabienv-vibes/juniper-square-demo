@@ -249,6 +249,59 @@ WHERE i.arena_id = '{arena_id}'
 GROUP BY i.investor_id, i.investor_name, i.type, i.city, i.state
 ORDER BY total_commitment DESC""",
     ),
+    BenchmarkQuery(
+        name="worst_case_yoy_growth",
+        display_name="Q7 — Worst-case: cross-arena 3-year YoY growth (DBSQL only)",
+        category="Worst-case / redline",
+        weight=1,
+        summary="Full-silver scan, no arena filter, 3-join × 2 window CTEs. Designed to "
+                "defeat Liquid Clustering pruning and force the warehouse to bend.",
+        sql_dbsql="""WITH annual_revenue AS (
+  SELECT
+    gl.property_id,
+    gl.fiscal_year,
+    SUM(CASE WHEN gl.category = 'revenue' THEN gl.amount ELSE 0 END) AS rev,
+    COUNT(DISTINCT gl.counterparty_id) AS counterparty_count
+  FROM juniper_square_demo_catalog.pipeline.silver_gl_transactions gl
+  JOIN juniper_square_demo_catalog.pipeline.silver_properties p
+    ON p.property_id = gl.property_id
+  JOIN juniper_square_demo_catalog.pipeline.silver_funds f
+    ON f.fund_id = gl.fund_id
+  WHERE gl.fiscal_year BETWEEN year(current_date()) - 3 AND year(current_date())
+    AND gl.approval_status = 'approved'
+    AND gl.currency = 'USD'
+  GROUP BY gl.property_id, gl.fiscal_year
+),
+growth AS (
+  SELECT property_id, fiscal_year, rev, counterparty_count,
+         LAG(rev) OVER (PARTITION BY property_id ORDER BY fiscal_year) AS prev_rev,
+         (rev - LAG(rev) OVER (PARTITION BY property_id ORDER BY fiscal_year))
+           / NULLIF(LAG(rev) OVER (PARTITION BY property_id ORDER BY fiscal_year), 0) AS yoy_growth
+  FROM annual_revenue
+),
+ranked AS (
+  SELECT property_id, fiscal_year, rev, prev_rev, yoy_growth, counterparty_count,
+         RANK() OVER (PARTITION BY fiscal_year ORDER BY yoy_growth DESC) AS rnk
+  FROM growth
+  WHERE yoy_growth IS NOT NULL
+)
+SELECT property_id, fiscal_year, rev, prev_rev, yoy_growth, counterparty_count, rnk
+FROM ranked
+WHERE rnk <= 100
+ORDER BY fiscal_year DESC, rnk
+LIMIT 300""",
+        sql_lakebase="-- Q7 is DBSQL-only: silver_gl_transactions is not synced to Lakebase.",
+    ),
+    BenchmarkQuery(
+        name="shaz_production",
+        display_name="Q8 — Customer's scariest production query (placeholder)",
+        category="Customer query",
+        weight=1,
+        summary="Reserved slot for Shaz's actual production SQL. Will replace this stub "
+                "once delivered. Disabled in the harness until then (enabled: false).",
+        sql_dbsql="-- Pending: customer's scariest production SQL (as of 2026-04-24).",
+        sql_lakebase="-- Pending: customer's scariest production SQL (as of 2026-04-24).",
+    ),
 ]
 
 

@@ -1,0 +1,4 @@
+version,timestamp,userName,operation,operationParameters,operationMetrics
+2,2026-04-23T21:21:01.000Z,fabien.vaucheret@databricks.com,WRITE,"{""mode"":""Append"",""statsOnLoad"":""true"",""partitionBy"":""[]""}","{""numFiles"":""1"",""numOutputRows"":""13"",""numOutputBytes"":""4890""}"
+1,2026-04-23T20:44:04.000Z,fabien.vaucheret@databricks.com,WRITE,"{""mode"":""Append"",""statsOnLoad"":""true"",""partitionBy"":""[]""}","{""numFiles"":""1"",""numOutputRows"":""13"",""numOutputBytes"":""4874""}"
+0,2026-04-23T20:43:58.000Z,fabien.vaucheret@databricks.com,CREATE TABLE,"{""partitionBy"":""[]"",""isManaged"":""true""}","{}"

@@ -1,0 +1,6 @@
+pipeline_id,name,pipeline_type,created_by,create_time,change_time
+390e607c-83e4-4df8-8468-4655bb8c341a,juniper_benchmark_medallion,WORKFLOW,fabien.vaucheret@databricks.com,2026-04-15T14:22:08,2026-04-24T09:18:41
+601e2e44-85eb-41a1-bbfe-864fb34d49d6,Synced table: juniper_serving.serving.gold_arena_overview,MANAGED_INGESTION,fabien.vaucheret@databricks.com,2026-04-24T10:12:03,2026-04-24T10:45:22
+841057c7-d083-43f2-b193-62172188c8cd,Synced table: juniper_serving.serving.gold_fund_performance,MANAGED_INGESTION,fabien.vaucheret@databricks.com,2026-04-24T10:14:17,2026-04-24T10:45:55
+ab0f40a6-622d-4d3a-8272-67f42ca1aa83,Synced table: juniper_serving.serving.gold_property_financials,MANAGED_INGESTION,fabien.vaucheret@databricks.com,2026-04-24T10:16:41,2026-04-24T10:48:12
+272d508b-941a-45dc-92ac-fd4ce019e616,Synced table: juniper_serving.serving.gold_gl_monthly_summary,MANAGED_INGESTION,fabien.vaucheret@databricks.com,2026-04-24T10:19:07,2026-04-24T10:48:58

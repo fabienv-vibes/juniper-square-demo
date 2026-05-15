@@ -9,7 +9,7 @@ command:
 
 env:
   - name: DATABRICKS_WAREHOUSE_ID
-    value: "133b52f9331b883d"
+    value: "aae8e7baf626bd0d"
   - name: DATABRICKS_CATALOG
     value: "juniper_square_demo_catalog"
   - name: DATABRICKS_SCHEMA
@@ -21,7 +21,7 @@ env:
 
 resources:
   - name: benchmark-warehouse
-    description: "Serverless Starter warehouse for benchmark queries"
+    description: "Serverless Medium Pro warehouse, autoscale 1-4 (juniper-benchmark-warehouse)"
     sql_warehouse:
-      id: "133b52f9331b883d"
+      id: "aae8e7baf626bd0d"
       permission: "CAN_USE"

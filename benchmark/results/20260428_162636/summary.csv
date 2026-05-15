@@ -1,0 +1,2 @@
+target,concurrency,query_name,total_queries,successful,failed,p50_ms,p95_ms,p99_ms,min_ms,max_ms,mean_ms,throughput_qps,error_rate
+dbsql,1,worst_case_yoy_growth,644,644,0,609.3084994456958,858.7340727352414,2043.0596475907043,522.3073628944803,3119.6635797755334,658.5973678190554,1.0733333333333333,0.0

@@ -1,0 +1,53 @@
+bundle:
+  name: juniper-square-demo
+
+include:
+  - resources/*.yml
+
+variables:
+  catalog:
+    description: "Unity Catalog name for all demo objects."
+    default: "juniper_square_demo_catalog"
+  raw_schema:
+    default: "raw"
+  pipeline_schema:
+    default: "pipeline"
+  serving_schema:
+    default: "serving"
+  volume_name:
+    default: "landing"
+  warehouse_name:
+    default: "juniper-benchmark-warehouse"
+  lakebase_project:
+    description: "Lakebase Autoscale project name. Created by the lakebase_setup notebook."
+    default: "juniper-sq-benchmark"
+  lakebase_database:
+    description: "Postgres database name inside the Lakebase project."
+    default: "databricks_postgres"
+  owner_email:
+    default: "fabien.vaucheret@databricks.com"
+
+targets:
+  # Current FEVM (fevm-juniper-square-demo). Names match what's already deployed
+  # so the bundle represents production state, not a separate dev copy.
+  juniper-square-demo:
+    default: true
+    presets:
+      name_prefix: ""
+    workspace:
+      profile: juniper-square-demo
+      root_path: /Workspace/Users/${var.owner_email}/.bundle/${bundle.name}/${bundle.target}
+    run_as:
+      user_name: ${var.owner_email}
+
+  # Template for a fresh FEVM if the current one gets reaped.
+  # Create the new workspace first (FEVM), set its CLI profile to "juniper-square-fresh", then:
+  #   databricks bundle deploy -t fresh
+  fresh:
+    presets:
+      name_prefix: ""
+    workspace:
+      profile: juniper-square-fresh
+      root_path: /Workspace/Users/${var.owner_email}/.bundle/${bundle.name}/${bundle.target}
+    run_as:
+      user_name: ${var.owner_email}

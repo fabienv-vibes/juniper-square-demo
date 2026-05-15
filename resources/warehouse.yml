@@ -1,0 +1,19 @@
+resources:
+  sql_warehouses:
+    juniper_benchmark_warehouse:
+      name: ${var.warehouse_name}
+      cluster_size: Medium
+      warehouse_type: PRO
+      enable_serverless_compute: true
+      enable_photon: true
+      auto_stop_mins: 60
+      min_num_clusters: 1
+      max_num_clusters: 8
+      channel:
+        name: CHANNEL_NAME_CURRENT
+      tags:
+        custom_tags:
+          - key: project
+            value: juniper-benchmark
+          - key: owner
+            value: fabien.vaucheret

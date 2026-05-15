@@ -4,7 +4,10 @@
 # --- DBSQL Connection ---
 dbsql:
   hostname: "fevm-juniper-square-demo.cloud.databricks.com"
-  http_path: "/sql/1.0/warehouses/133b52f9331b883d"
+  # juniper-benchmark-warehouse: Medium Pro, autoscale min=1 max=4, 10-min auto-stop.
+  # Created 2026-04-24 for the scale-up / redline benchmark. The old Small fixed
+  # warehouse (133b52f9331b883d) still exists for app references and side experiments.
+  http_path: "/sql/1.0/warehouses/aae8e7baf626bd0d"
   token: "YOUR_DATABRICKS_TOKEN"
 
 # --- Lakebase Connection ---
@@ -16,11 +19,75 @@ lakebase:
   password: "YOUR_TOKEN"
   sslmode: "require"
 
-# --- Benchmark Parameters ---
+# --- Benchmark Parameters (lockstep mode — current default) ---
 benchmark:
-  levels: [1, 2, 4, 8, 16, 32, 64]
+  # Concurrency profile for the 2 TB scale-up / redline run. Pushes hard enough to
+  # demonstrate Medium Pro 1->8 warehouse scale-out and Lakebase 1->4 CU scale-up.
+  # Concurrency 100 is the high-water mark expected to fire scale-out events on
+  # both targets.
+  levels: [5, 10, 20, 50, 100]
   iterations: 5       # measured rounds per level
   warmup: 1           # warmup rounds (excluded from stats)
+
+# --- Sustained-rate Scenarios (mode=sustained) ---
+# Realistic workload simulation: queries arrive on a Poisson schedule at a target
+# QPS for a fixed wall-clock duration. Defeats coordinated omission, matches real
+# Looker/dashboard traffic. Each scenario invokable via --scenario <name>.
+#
+# Workload calibration from Shaz's 2026-04-23 numbers:
+#   - Peak Looker BI: 5 QPS spikes during workday
+#   - Dashboards: 100/day (bursty, included implicitly in mix)
+#   - Daily company-wide: ~30K queries
+#   - June 2026 rollout: ~5x current data volume (4.5B documents)
+sustained_scenarios:
+  sustained_peak:
+    rate_qps: 5.0
+    duration_seconds: 600    # 10 min measurement
+    warmup_seconds: 90        # 90s warmup, kept and visible as cold-start chart
+    arrival_distribution: poisson
+    # No query_filter -- runs the weighted dashboard mix Q1-Q6.
+    # Q7 is targets:[dbsql] only (won't be in mix when target=lakebase).
+
+  sustained_headroom_2x:
+    rate_qps: 10.0
+    duration_seconds: 600
+    warmup_seconds: 90
+    arrival_distribution: poisson
+
+  sustained_scale_4x:
+    rate_qps: 20.0
+    duration_seconds: 600
+    warmup_seconds: 90
+    arrival_distribution: poisson
+    # Tests the June rollout / 1K->10K customer scale claim.
+    # Pre-flight: warehouse max-clusters bumped to 8 (done 2026-04-28).
+
+  sustained_worst_case_q7:
+    rate_qps: 1.0
+    duration_seconds: 600
+    warmup_seconds: 90
+    arrival_distribution: poisson
+    query_filter: ["worst_case_yoy_growth"]
+    # Q7-only at 1 QPS -- represents an analyst drip of silver-scan ad-hoc queries.
+    # 600 samples; autoscale settled by end of warmup. Clean steady-state Q7 cost.
+
+  # Rerun-only scenario (added 2026-04-28): clean 5 QPS dashboard-only number
+  # with extended 180s warmup. The original sustained_peak run included Q7 in the
+  # weighted mix, which contaminated the median P95 with cold-start outliers
+  # (~77s spike). This scenario filters Q7 out and warms longer so IWM is fully
+  # provisioned before measurement starts.
+  sustained_peak_dashboard_only:
+    rate_qps: 5.0
+    duration_seconds: 600
+    warmup_seconds: 180
+    arrival_distribution: poisson
+    query_filter:
+      - "fund_performance_arena"
+      - "gl_monthly_by_arena_year"
+      - "property_financials_joined"
+      - "top10_properties_by_revenue"
+      - "pnl_rollup_multi_month"
+      - "investor_commitment_summary"
 
 # --- Delta persistence target (where benchmark_runs / benchmark_summary / benchmark_raw are written) ---
 # Writes go through the dbsql connection above. Disable per-run with --skip-delta-write.
@@ -148,6 +215,13 @@ arena_id_pool:
 #
 # Optional per-query 'weight' (default 1) controls how often the query appears
 # in the round-robin rotation. Example: weight=3 => appears 3x per cycle.
+#
+# Optional per-query 'targets' (default [dbsql, lakebase]) scopes which targets
+# the query runs against. Example: targets: [dbsql] for DBSQL-only queries like
+# Q7 (silver scan — silver tables are not synced to Lakebase).
+#
+# Optional per-query 'enabled' (default true). Set to false to skip a query
+# entirely, e.g. a placeholder awaiting the real SQL body.
 #
 # DBSQL uses Spark SQL; Lakebase uses Postgres. Key differences handled:
 #   - Date math: add_months(current_date(), -N)  vs  (current_date - interval 'N months')
@@ -371,3 +445,53 @@ queries:
       WHERE i.arena_id = '{arena_id}'
       GROUP BY i.investor_id, i.investor_name, i.type, i.city, i.state
       ORDER BY total_commitment DESC
+
+  - name: "worst_case_yoy_growth"
+    weight: 1
+    targets: [dbsql]
+    sql_dbsql: |
+      WITH annual_revenue AS (
+        SELECT
+          gl.property_id,
+          gl.fiscal_year,
+          SUM(CASE WHEN gl.category = 'revenue' THEN gl.amount ELSE 0 END) AS rev,
+          COUNT(DISTINCT gl.counterparty_id) AS counterparty_count
+        FROM juniper_square_demo_catalog.pipeline.silver_gl_transactions gl
+        JOIN juniper_square_demo_catalog.pipeline.silver_properties p
+          ON p.property_id = gl.property_id
+        JOIN juniper_square_demo_catalog.pipeline.silver_funds f
+          ON f.fund_id = gl.fund_id
+        WHERE gl.fiscal_year BETWEEN year(current_date()) - 3 AND year(current_date())
+          AND gl.approval_status = 'approved'
+          AND gl.currency = 'USD'
+        GROUP BY gl.property_id, gl.fiscal_year
+      ),
+      growth AS (
+        SELECT
+          property_id, fiscal_year, rev, counterparty_count,
+          LAG(rev) OVER (PARTITION BY property_id ORDER BY fiscal_year) AS prev_rev,
+          (rev - LAG(rev) OVER (PARTITION BY property_id ORDER BY fiscal_year))
+            / NULLIF(LAG(rev) OVER (PARTITION BY property_id ORDER BY fiscal_year), 0) AS yoy_growth
+        FROM annual_revenue
+      ),
+      ranked AS (
+        SELECT
+          property_id, fiscal_year, rev, prev_rev, yoy_growth, counterparty_count,
+          RANK() OVER (PARTITION BY fiscal_year ORDER BY yoy_growth DESC) AS rnk
+        FROM growth
+        WHERE yoy_growth IS NOT NULL
+      )
+      SELECT property_id, fiscal_year, rev, prev_rev, yoy_growth, counterparty_count, rnk
+      FROM ranked
+      WHERE rnk <= 100
+      ORDER BY fiscal_year DESC, rnk
+      LIMIT 300
+
+  - name: "shaz_production"
+    weight: 1
+    enabled: false
+    sql_dbsql: |
+      -- TBD: Shaz's scariest production SQL query (pending as of 2026-04-24).
+      SELECT 1 AS placeholder
+    sql_lakebase: |
+      SELECT 1 AS placeholder

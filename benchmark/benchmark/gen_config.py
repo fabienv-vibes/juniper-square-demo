@@ -233,6 +233,8 @@ def main():
             "sslmode": "require",
         },
         "benchmark": base.get("benchmark", {}),
+        "sustained_scenarios": base.get("sustained_scenarios", {}),
+        "delta_persistence": base.get("delta_persistence", {}),
         "arena_id_pool": arena_id_pool,
         "queries": base.get("queries", []),
     }

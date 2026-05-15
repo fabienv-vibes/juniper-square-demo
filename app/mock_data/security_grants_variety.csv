@@ -1,0 +1,15 @@
+object_type,object_key,grantor,grantee,privilege_type,is_grantable,inherited_from
+CATALOG,juniper_square_demo_catalog,fabien.vaucheret@databricks.com,account users,USE CATALOG,NO,NONE
+CATALOG,juniper_square_demo_catalog,fabien.vaucheret@databricks.com,fabien.vaucheret@databricks.com,ALL PRIVILEGES,YES,NONE
+CATALOG,juniper_square_demo_catalog,fabien.vaucheret@databricks.com,juniper-benchmark-viewer-sp,USE CATALOG,NO,NONE
+SCHEMA,juniper_square_demo_catalog.pipeline,fabien.vaucheret@databricks.com,account users,USE SCHEMA,NO,NONE
+SCHEMA,juniper_square_demo_catalog.pipeline,fabien.vaucheret@databricks.com,fabien.vaucheret@databricks.com,ALL PRIVILEGES,YES,CATALOG juniper_square_demo_catalog
+SCHEMA,juniper_square_demo_catalog.pipeline,fabien.vaucheret@databricks.com,juniper-benchmark-viewer-sp,USE SCHEMA,NO,NONE
+TABLE,juniper_square_demo_catalog.pipeline.benchmark_summary,fabien.vaucheret@databricks.com,account users,SELECT,NO,NONE
+TABLE,juniper_square_demo_catalog.pipeline.benchmark_summary,fabien.vaucheret@databricks.com,juniper-benchmark-viewer-sp,SELECT,NO,NONE
+TABLE,juniper_square_demo_catalog.pipeline.gold_gl_monthly_summary,fabien.vaucheret@databricks.com,account users,SELECT,NO,NONE
+TABLE,juniper_square_demo_catalog.pipeline.gold_gl_monthly_summary,fabien.vaucheret@databricks.com,juniper-benchmark-viewer-sp,SELECT,NO,NONE
+TABLE,juniper_square_demo_catalog.pipeline.silver_gl_transactions,fabien.vaucheret@databricks.com,account users,SELECT,NO,NONE
+TABLE,juniper_square_demo_catalog.pipeline.silver_gl_transactions,fabien.vaucheret@databricks.com,juniper-benchmark-viewer-sp,SELECT,NO,NONE
+TABLE,juniper_square_demo_catalog.pipeline.silver_investors,fabien.vaucheret@databricks.com,account users,SELECT,NO,NONE
+TABLE,juniper_square_demo_catalog.pipeline.silver_investors,fabien.vaucheret@databricks.com,juniper-benchmark-viewer-sp,SELECT,NO,NONE

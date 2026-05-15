@@ -1,0 +1,23 @@
+resources:
+  pipelines:
+    sdp_medallion:
+      name: juniper_benchmark_medallion
+      catalog: ${var.catalog}
+      target: ${var.pipeline_schema}
+      serverless: true
+      photon: true
+      channel: CURRENT
+      edition: ADVANCED
+      continuous: false
+      development: true
+      configuration:
+        pipelines.autoOptimize.managed: "true"
+        pipelines.enableTrackHistory: "true"
+        raw_data_path: /Volumes/${var.catalog}/${var.raw_schema}/${var.volume_name}
+      libraries:
+        - notebook:
+            path: ../data/sdp_pipeline/bronze_ingestion.py
+        - notebook:
+            path: ../data/sdp_pipeline/silver_transformations.py
+        - notebook:
+            path: ../data/sdp_pipeline/gold_aggregations.py

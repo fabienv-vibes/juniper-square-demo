@@ -1,33 +1,37 @@
 # Databricks notebook source
 
 # MAGIC %md
-# MAGIC # Lakebase Autoscale Sync: Gold Tables via Managed Synced Tables (Snapshot)
+# MAGIC # Lakebase Autoscale Sync: Gold Tables via Managed Synced Tables (BOOTSTRAP)
 # MAGIC
-# MAGIC Syncs the four benchmark gold tables from `juniper_square_demo_catalog.pipeline` into a
-# MAGIC Lakebase Autoscale project using **managed Synced Tables** (Lakeflow-backed reverse-ETL)
-# MAGIC in `SNAPSHOT` mode. The Streamlit benchmark harness then hits Postgres directly to compare
-# MAGIC concurrency/latency against DBSQL.
+# MAGIC **This notebook is a one-time bootstrap — it registers the four benchmark gold tables as
+# MAGIC managed Synced Tables in `TRIGGERED` mode. Ongoing refreshes happen via the
+# MAGIC `juniper-benchmark-refresh` orchestration job, which references each synced table's
+# MAGIC underlying pipeline as a `pipeline_task`.**
 # MAGIC
-# MAGIC **Why synced tables (vs psycopg2 `COPY FROM STDIN`)?**
-# MAGIC - Aligns with the `databricks-lakebase-autoscale` skill's recommended reverse-ETL pattern.
-# MAGIC - Managed Lakeflow pipeline handles Delta read + Postgres write; no manual OAuth token
-# MAGIC   juggling, no manual DDL, no `COPY` buffering.
-# MAGIC - Snapshot mode is explicitly called out in the skill as best for "initial setup, historical
-# MAGIC   analysis" — matches our one-shot-before-benchmark need.
-# MAGIC - Data lineage shows up in Unity Catalog (UC creates a read-only managed table pointing at
-# MAGIC   the Postgres copy).
-# MAGIC - Trivial re-run: call the same API, it refreshes.
+# MAGIC **Source tables:** The gold MVs in `juniper_square_demo_catalog.pipeline.gold_*` can't have
+# MAGIC Change Data Feed enabled directly (MVs are SDP-managed; CDF is not preview-supported on
+# MAGIC them in this workspace). Instead, we sync from CDF-enabled Delta copies named
+# MAGIC `gold_*_synced` in the same schema. The orchestration job keeps those copies refreshed
+# MAGIC via a `refresh_cdf_copies` SQL task before fanning out to the per-table sync pipelines.
 # MAGIC
-# MAGIC **What the notebook does:**
-# MAGIC 1. Ensures the Lakebase database + schema exist (still needs psycopg for the pre-sync bootstrap).
-# MAGIC 2. Creates one synced table per gold table with `SyncedTableSchedulingPolicy.SNAPSHOT`.
-# MAGIC 3. Polls until each synced table reaches an `ONLINE_*` state (data available).
-# MAGIC 4. Adds the custom indexes we need for the benchmark queries (synced tables only create
-# MAGIC    the PK automatically; secondary indexes must be added via `CREATE INDEX`).
-# MAGIC 5. Runs `ANALYZE` and compares row counts Delta vs Lakebase for verification.
+# MAGIC **Why TRIGGERED instead of SNAPSHOT?**
+# MAGIC - TRIGGERED pipelines can be invoked directly as `pipeline_task` entries in a Databricks
+# MAGIC   Job (SNAPSHOT pipelines are one-shot and aren't schedulable as tasks).
+# MAGIC - Propagates inserts/updates/deletes via CDF rather than full reload.
+# MAGIC - The managed Lakeflow pipeline per synced table persists and is visible in
+# MAGIC   `databricks pipelines list` — deep-linkable, observable, and orchestrateable.
 # MAGIC
-# MAGIC **Source of reference:** the original psycopg2 implementation is preserved at
-# MAGIC `06_lakebase_sync_psycopg2.py.bak` in this same directory.
+# MAGIC **What this notebook does (idempotent):**
+# MAGIC 1. Ensures the Lakebase database + schema exist.
+# MAGIC 2. Drops any existing synced tables (supports SNAPSHOT→TRIGGERED upgrade).
+# MAGIC 3. Creates one synced table per gold copy with `SyncedTableSchedulingPolicy.TRIGGERED`.
+# MAGIC 4. Polls until each reaches an `ONLINE_*` state.
+# MAGIC 5. **Prints the `pipeline_id` per table** — paste these into the orchestration job JSON.
+# MAGIC 6. Creates secondary indexes on `arena_id` (and `(arena_id, month)`).
+# MAGIC 7. Runs `ANALYZE` and verifies row counts vs Delta.
+# MAGIC
+# MAGIC **Reference implementation:** `06_lakebase_sync_psycopg2.py.bak` is the original
+# MAGIC `COPY FROM STDIN` approach (kept for ultra-fast bulk loads, unused here).
 
 # COMMAND ----------
 
@@ -98,7 +102,10 @@ TABLE_SPECS = {
         ],
     },
     "gold_property_financials": {
-        "pk": ["property_id", "month"],
+        # PK includes arena_id because gold_property_financials groups by
+        # (arena_id, property_id, month) — properties can repeat across arenas
+        # in the wider-scale generator (1K properties shared across 10K arenas).
+        "pk": ["arena_id", "property_id", "month"],
         "indexes": [
             ("ix_prop_fin_arena",       "(arena_id)"),
             ("ix_prop_fin_arena_month", "(arena_id, month)"),
@@ -134,17 +141,18 @@ w = WorkspaceClient()
 print(f"SDK version OK — connected as {w.current_user.me().user_name}")
 
 def source_exists(table: str) -> bool:
+    # Check for the CDF-enabled *_synced copy (that's what we actually sync from)
     try:
-        return spark.catalog.tableExists(f"{CATALOG}.{SOURCE_SCHEMA}.{table}")
+        return spark.catalog.tableExists(f"{CATALOG}.{SOURCE_SCHEMA}.{table}_synced")
     except Exception:
         return False
 
 missing = [t for t in SYNC_ORDER if not source_exists(t)]
 if missing:
-    print(f"WARN: source tables not materialized yet: {missing}")
-    print("These will be skipped. Re-run after the SDP pipeline finishes.")
+    print(f"WARN: *_synced source copies not materialized yet: {missing}")
+    print("These will be skipped. Create them via the orchestration job's refresh_cdf_copies task, then re-run.")
 present = [t for t in SYNC_ORDER if t not in missing]
-print(f"Sources present: {present}")
+print(f"*_synced sources present: {present}")
 
 # COMMAND ----------
 
@@ -260,25 +268,37 @@ def _synced_uc_name(table: str) -> str:
     # UC three-part name where the catalog points at Lakebase
     return f"{LAKEBASE_DATABASE}.{LAKEBASE_SCHEMA}.{table}"
 
-def create_or_get_synced(table: str, pk_cols: list[str]):
-    """Create the synced table; if it already exists, fetch and return it."""
-    uc_name = _synced_uc_name(table)
-    src_fqn = f"{CATALOG}.{SOURCE_SCHEMA}.{table}"
-    try:
-        existing = w.database.get_synced_database_table(name=uc_name)
-        print(f"  -> already exists: {uc_name}")
-        return existing
-    except Exception:
-        pass
+def _source_fqn(table: str) -> str:
+    # Point at the CDF-enabled *_synced copies in the pipeline schema.
+    # Gold MVs can't have CDF flipped on directly; the orchestration job's
+    # refresh_cdf_copies task keeps these copies in sync with the MVs.
+    return f"{CATALOG}.{SOURCE_SCHEMA}.{table}_synced"
 
-    print(f"  creating synced table: {uc_name}")
+def drop_if_exists(table: str) -> None:
+    """Delete an existing synced table so a TRIGGERED one can replace a SNAPSHOT one.
+    No-op if it doesn't exist."""
+    uc_name = _synced_uc_name(table)
+    try:
+        w.database.delete_synced_database_table(name=uc_name)
+        print(f"  dropped existing synced table: {uc_name}")
+    except Exception as e:
+        if "not found" in str(e).lower() or "does not exist" in str(e).lower():
+            return
+        # Best-effort: log and continue (may be mid-provisioning / PG-side orphan).
+        print(f"  (delete attempt info: {e})")
+
+def create_synced_triggered(table: str, pk_cols: list[str]):
+    """Create the synced table fresh in TRIGGERED mode."""
+    uc_name = _synced_uc_name(table)
+    src_fqn = _source_fqn(table)
+    print(f"  creating TRIGGERED synced table: {uc_name}  <- {src_fqn}")
     created = w.database.create_synced_database_table(
         SyncedDatabaseTable(
             name=uc_name,
             spec=SyncedTableSpec(
                 source_table_full_name=src_fqn,
                 primary_key_columns=pk_cols,
-                scheduling_policy=SyncedTableSchedulingPolicy.SNAPSHOT,
+                scheduling_policy=SyncedTableSchedulingPolicy.TRIGGERED,
                 new_pipeline_spec=NewPipelineSpec(
                     storage_catalog=SYNCED_STORAGE_CATALOG,
                     storage_schema=SYNCED_STORAGE_SCHEMA,
@@ -295,7 +315,8 @@ for table in SYNC_ORDER:
         print(f"  skipping — source not materialized")
         continue
     spec = TABLE_SPECS[table]
-    created_tables[table] = create_or_get_synced(table, spec["pk"])
+    drop_if_exists(table)
+    created_tables[table] = create_synced_triggered(table, spec["pk"])
 
 print(f"\nSynced-table create phase done for {len(created_tables)} table(s).")
 
@@ -364,6 +385,33 @@ for table in created_tables:
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## Capture pipeline_ids for the orchestration job
+# MAGIC
+# MAGIC Each TRIGGERED synced table is backed by its own managed Lakeflow pipeline. Grab the
+# MAGIC `pipeline_id` per table so the orchestration job can reference them directly as
+# MAGIC `pipeline_task` entries (parallel fan-out after the medallion SDP pipeline completes).
+
+# COMMAND ----------
+
+pipeline_ids = {}
+for table in created_tables:
+    st = w.database.get_synced_database_table(name=_synced_uc_name(table))
+    pid = None
+    if st.data_synchronization_status is not None:
+        pid = getattr(st.data_synchronization_status, "pipeline_id", None)
+    if pid is None:
+        # Fall back: the spec itself may expose pipeline_id on the response
+        pid = getattr(st.spec, "pipeline_id", None) if st.spec else None
+    pipeline_ids[table] = pid
+    print(f"  {table:40s} pipeline_id = {pid}")
+
+print("\nPaste these into juniper-benchmark-refresh job JSON:")
+for table, pid in pipeline_ids.items():
+    print(f'  "sync_{table.replace("gold_", "")}" -> {pid}')
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## Create secondary indexes
 # MAGIC
 # MAGIC Synced tables auto-create the PK unique index but not additional indexes. We add the ones
@@ -397,7 +445,7 @@ for table in created_tables:
 # COMMAND ----------
 
 def verify(table: str) -> dict:
-    src_fqn = f"{CATALOG}.{SOURCE_SCHEMA}.{table}"
+    src_fqn = _source_fqn(table)  # counts the *_synced copy we actually sync from
     delta_count = spark.table(src_fqn).count()
 
     with _fresh_pg_conn(LAKEBASE_DATABASE) as conn:

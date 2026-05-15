@@ -1,0 +1,84 @@
+resources:
+  jobs:
+    juniper_data_gen:
+      name: juniper-data-gen-wider
+      description: "Generate ~10B GL transaction rows + dim tables into the raw landing volume. ~12 min serverless."
+      timeout_seconds: 14400
+      max_concurrent_runs: 1
+      queue:
+        enabled: true
+      tags:
+        owner: fabien.vaucheret
+        project: juniper-benchmark
+      environments:
+        - environment_key: default
+          spec:
+            client: "2"
+      tasks:
+        - task_key: generate_gl
+          notebook_task:
+            notebook_path: ../data/data_gen/generate_gl_spark.py
+          environment_key: default
+
+    juniper_benchmark_refresh:
+      name: juniper-benchmark-refresh
+      description: |
+        Orchestrates the Juniper Square benchmark data refresh.
+        Step 1: SDP medallion pipeline (bronze -> silver -> gold).
+        Step 2: 4 parallel Lakebase sync pipelines (one per gold table).
+        Sync pipeline IDs are populated by the lakebase_setup notebook
+        and re-bound at deploy time via the bundle's `lakebase_sync_*` resources.
+      timeout_seconds: 7200
+      max_concurrent_runs: 1
+      queue:
+        enabled: true
+      tags:
+        owner: fabien.vaucheret
+        project: juniper-benchmark
+      tasks:
+        - task_key: sdp_medallion_pipeline
+          description: "Bronze (Auto Loader) -> silver (liquid-clustered) -> gold aggregates"
+          timeout_seconds: 7200
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.sdp_medallion.id}
+            full_refresh: false
+
+        # Sync pipeline IDs are looked up by name (they're created out-of-band by
+        # the lakebase_setup notebook because synced tables aren't first-class
+        # DAB resources). Update these IDs once after the first lakebase_setup run,
+        # or use the `lakebase_setup` task variant below.
+        #
+        # See REHYDRATE.md for the bootstrap order.
+
+    lakebase_setup:
+      name: juniper-lakebase-setup
+      description: |
+        ONE-SHOT bootstrap. Creates (idempotently):
+          1. Lakebase Autoscale project (juniper-sq-benchmark), 1-4 CU
+          2. 4 synced tables (gold_* -> Lakebase, SNAPSHOT mode)
+          3. Stitches sync pipeline_ids into the juniper-benchmark-refresh job
+
+        Run this AFTER `databricks bundle deploy` and BEFORE the first
+        `databricks bundle run juniper_benchmark_refresh`.
+      timeout_seconds: 3600
+      max_concurrent_runs: 1
+      tags:
+        owner: fabien.vaucheret
+        project: juniper-benchmark
+      environments:
+        - environment_key: default
+          spec:
+            client: "2"
+      tasks:
+        - task_key: setup_lakebase
+          notebook_task:
+            notebook_path: ../data/notebooks/lakebase_setup.py
+            base_parameters:
+              catalog: ${var.catalog}
+              pipeline_schema: ${var.pipeline_schema}
+              serving_schema: ${var.serving_schema}
+              lakebase_project: ${var.lakebase_project}
+              lakebase_database: ${var.lakebase_database}
+              sdp_pipeline_id: ${resources.pipelines.sdp_medallion.id}
+              refresh_job_id: ${resources.jobs.juniper_benchmark_refresh.id}
+          environment_key: default

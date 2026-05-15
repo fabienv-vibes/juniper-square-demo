@@ -1,0 +1,22 @@
+resources:
+  schemas:
+    raw:
+      catalog_name: ${var.catalog}
+      name: ${var.raw_schema}
+      comment: "Landing zone for generator output (UC volume + bronze sources)."
+    pipeline:
+      catalog_name: ${var.catalog}
+      name: ${var.pipeline_schema}
+      comment: "Medallion bronze/silver/gold tables + benchmark result Deltas."
+    serving:
+      catalog_name: ${var.catalog}
+      name: ${var.serving_schema}
+      comment: "Lakebase synced gold replicas (Postgres-backed serving layer)."
+
+  volumes:
+    landing:
+      catalog_name: ${var.catalog}
+      schema_name: ${var.raw_schema}
+      name: ${var.volume_name}
+      volume_type: MANAGED
+      comment: "Raw JSON/CSV/Parquet drop zone written by the data generator job."

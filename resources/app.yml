@@ -1,0 +1,12 @@
+resources:
+  apps:
+    juniper_benchmark_viewer:
+      name: juniper-benchmark-viewer
+      description: "Juniper Square benchmark results viewer (Streamlit). 7-pillar evaluation framing + sustained-rate latency story."
+      source_code_path: ../app
+      resources:
+        - name: juniper_benchmark_warehouse
+          description: "Used by the app to query benchmark_summary + UC system tables."
+          sql_warehouse:
+            id: ${resources.sql_warehouses.juniper_benchmark_warehouse.id}
+            permission: CAN_USE

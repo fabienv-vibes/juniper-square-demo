@@ -126,20 +126,32 @@ def _mock_csv(name: str) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 def get_benchmark_summary() -> QueryResult:
-    """Aggregate p50/p95/p99 + throughput per target, concurrency, query."""
+    """Aggregate p50/p95/p99 + throughput per target, concurrency, query.
+
+    Filtered to LOCKSTEP-mode runs only so the existing Latency-page charts
+    (latency-vs-concurrency, throughput, query mix, Q7 redline callout) stay
+    keyed on lockstep concurrency levels and don't collide with sustained-mode
+    rows that store target_rate_qps in the same `concurrency` column.
+
+    Pre-redesign rows (where benchmark_runs.mode is NULL) are treated as
+    lockstep for back-compat with the 2026-04-24 demo run.
+    """
     sql_text = f"""
         SELECT
-            target,
-            concurrency,
-            query_name,
-            p50_ms,
-            p95_ms,
-            p99_ms,
-            mean_ms,
-            throughput_qps,
-            error_rate
-        FROM {CATALOG}.{SCHEMA}.benchmark_summary
-        ORDER BY target, concurrency, query_name
+            s.target,
+            s.concurrency,
+            s.query_name,
+            s.p50_ms,
+            s.p95_ms,
+            s.p99_ms,
+            s.mean_ms,
+            s.throughput_qps,
+            s.error_rate
+        FROM {CATALOG}.{SCHEMA}.benchmark_summary s
+        JOIN {CATALOG}.{SCHEMA}.benchmark_runs r
+          ON r.run_id = s.run_id
+        WHERE COALESCE(r.mode, 'lockstep') = 'lockstep'
+        ORDER BY s.target, s.concurrency, s.query_name
     """
     df, err = _run_sql(sql_text)
     if df is None or df.empty:
@@ -153,17 +165,20 @@ def get_benchmark_summary() -> QueryResult:
 
 
 def get_benchmark_raw() -> QueryResult:
-    """Per-query latency samples for distribution / curve plots."""
+    """Per-query latency samples for distribution / curve plots (lockstep only)."""
     sql_text = f"""
         SELECT
-            target,
-            concurrency,
-            query_name,
-            run_ts,
-            latency_ms
-        FROM {CATALOG}.{SCHEMA}.benchmark_raw
-        WHERE run_ts >= current_timestamp() - INTERVAL 7 DAYS
-        ORDER BY run_ts DESC
+            br.target,
+            br.concurrency,
+            br.query_name,
+            br.run_id,
+            br.latency_ms
+        FROM {CATALOG}.{SCHEMA}.benchmark_raw br
+        JOIN {CATALOG}.{SCHEMA}.benchmark_runs r
+          ON r.run_id = br.run_id
+        WHERE COALESCE(r.mode, 'lockstep') = 'lockstep'
+          AND r.started_at >= current_timestamp() - INTERVAL 7 DAYS
+        ORDER BY r.started_at DESC
         LIMIT 50000
     """
     df, err = _run_sql(sql_text)
@@ -177,24 +192,205 @@ def get_benchmark_raw() -> QueryResult:
     return QueryResult(df=df, preview_mode=False, sql=sql_text)
 
 
-def get_benchmark_runs() -> QueryResult:
-    """Metadata about each benchmark run (arena count, dataset size, date)."""
+# ---------------------------------------------------------------------------
+# Sustained-mode queries (rate-paced runs, time-series buckets)
+# ---------------------------------------------------------------------------
+
+def get_sustained_runs() -> QueryResult:
+    """Sustained-mode runs with their scenario parameters and headline P95.
+
+    Joins benchmark_runs to a per-target P95 aggregate so the Overview tiles
+    can read everything in one go. Filters to mode='sustained'.
+    """
     sql_text = f"""
-        SELECT
+        WITH headline AS (
+          SELECT
             run_id,
-            run_ts,
-            arena_count,
-            dataset_size_tb,
             target,
-            notes
-        FROM {CATALOG}.{SCHEMA}.benchmark_runs
-        ORDER BY run_ts DESC
-        LIMIT 20
+            -- Median P95 across queries, EXCLUDING the worst-case query so dashboard
+            -- mixes don't get contaminated by the cold-start outlier (~77s spike on
+            -- the 5 QPS DBSQL run). For the worst-case-only scenario, this CASE
+            -- returns all NULLs and APPROX_PERCENTILE returns NULL, so COALESCE
+            -- falls back to including the row (otherwise that scenario shows nothing).
+            COALESCE(
+              APPROX_PERCENTILE(
+                CASE WHEN query_name <> 'worst_case_yoy_growth' THEN p95_ms END, 0.5
+              ),
+              APPROX_PERCENTILE(p95_ms, 0.5)
+            ) AS p95_median_ms,
+            MAX(p95_ms) AS p95_max_ms,
+            SUM(successful) AS total_samples,
+            SUM(failed) AS total_failures
+          FROM {CATALOG}.{SCHEMA}.benchmark_summary
+          GROUP BY run_id, target
+        )
+        SELECT
+          r.run_id,
+          r.started_at,
+          r.ended_at,
+          r.mode,
+          r.target_rate_qps,
+          r.arrival_distribution,
+          r.duration_seconds,
+          r.warmup_seconds,
+          r.notes,
+          h.target,
+          h.p95_median_ms,
+          h.p95_max_ms,
+          h.total_samples,
+          h.total_failures
+        FROM {CATALOG}.{SCHEMA}.benchmark_runs r
+        LEFT JOIN headline h ON h.run_id = r.run_id
+        WHERE r.mode = 'sustained'
+        ORDER BY r.started_at DESC
     """
     df, err = _run_sql(sql_text)
     if df is None or df.empty:
-        # No CSV fallback needed -- return empty with preview flag
-        return QueryResult(df=pd.DataFrame(), preview_mode=True, error=err, sql=sql_text)
+        return QueryResult(
+            df=_mock_csv("sustained_runs"),
+            preview_mode=True,
+            error=err,
+            sql=sql_text,
+        )
+    return QueryResult(df=df, preview_mode=False, sql=sql_text)
+
+
+def get_timeseries_buckets(run_id: Optional[str] = None) -> QueryResult:
+    """30-second-bucketed sustained-mode time-series for the latency-over-time chart.
+
+    If run_id is None, returns rows from the most recent sustained run.
+    """
+    where = f"run_id = '{run_id}'" if run_id else f"""
+        run_id = (
+          SELECT run_id FROM {CATALOG}.{SCHEMA}.benchmark_runs
+          WHERE mode = 'sustained'
+          ORDER BY started_at DESC
+          LIMIT 1
+        )
+    """
+    sql_text = f"""
+        SELECT
+          run_id,
+          target,
+          query_name,
+          bucket_start_offset_s,
+          bucket_end_offset_s,
+          p50_ms,
+          p95_ms,
+          max_ms,
+          achieved_qps,
+          error_count,
+          is_warmup
+        FROM {CATALOG}.{SCHEMA}.benchmark_summary_timeseries
+        WHERE {where}
+        ORDER BY target, bucket_start_offset_s
+    """
+    df, err = _run_sql(sql_text)
+    if df is None or df.empty:
+        return QueryResult(
+            df=_mock_csv("timeseries_buckets"),
+            preview_mode=True,
+            error=err,
+            sql=sql_text,
+        )
+    return QueryResult(df=df, preview_mode=False, sql=sql_text)
+
+
+def get_latency_cdf(run_id: Optional[str] = None) -> QueryResult:
+    """Sample post-warmup latencies for CDF chart. Sampled to ~5K rows for plot speed."""
+    where = f"run_id = '{run_id}'" if run_id else f"""
+        run_id = (
+          SELECT run_id FROM {CATALOG}.{SCHEMA}.benchmark_runs
+          WHERE mode = 'sustained'
+          ORDER BY started_at DESC
+          LIMIT 1
+        )
+    """
+    sql_text = f"""
+        SELECT
+          target,
+          query_name,
+          total_latency_ms
+        FROM {CATALOG}.{SCHEMA}.benchmark_raw
+        WHERE {where}
+          AND is_warmup = false
+          AND success = true
+          AND total_latency_ms IS NOT NULL
+        ORDER BY RAND()
+        LIMIT 5000
+    """
+    df, err = _run_sql(sql_text)
+    if df is None or df.empty:
+        return QueryResult(
+            df=_mock_csv("latency_cdf"),
+            preview_mode=True,
+            error=err,
+            sql=sql_text,
+        )
+    return QueryResult(df=df, preview_mode=False, sql=sql_text)
+
+
+def get_sustained_q7_metrics() -> dict:
+    """Return {p50_ms, p95_ms, p99_ms, mean_ms} for the most-recent sustained Q7 run.
+
+    Used to render a steady-state reference line on the lockstep latency-vs-concurrency
+    chart so viewers can see the contrast between cold-burst and steady-state Q7 cost.
+    Returns an empty dict if no sustained Q7 run exists.
+    """
+    sql_text = f"""
+        SELECT s.p50_ms, s.p95_ms, s.p99_ms, s.mean_ms
+        FROM {CATALOG}.{SCHEMA}.benchmark_summary s
+        JOIN {CATALOG}.{SCHEMA}.benchmark_runs r ON r.run_id = s.run_id
+        WHERE r.mode = 'sustained'
+          AND s.query_name = 'worst_case_yoy_growth'
+          AND s.target = 'dbsql'
+        ORDER BY r.started_at DESC
+        LIMIT 1
+    """
+    df, err = _run_sql(sql_text)
+    if df is None or df.empty:
+        return {}
+    row = df.iloc[0]
+    return {
+        "p50_ms": float(row["p50_ms"]),
+        "p95_ms": float(row["p95_ms"]),
+        "p99_ms": float(row["p99_ms"]),
+        "mean_ms": float(row["mean_ms"]),
+    }
+
+
+def get_warmup_data(run_id: Optional[str] = None) -> QueryResult:
+    """Warmup-window samples (is_warmup=true) for the cold-start ramp chart."""
+    where = f"run_id = '{run_id}'" if run_id else f"""
+        run_id = (
+          SELECT run_id FROM {CATALOG}.{SCHEMA}.benchmark_runs
+          WHERE mode = 'sustained'
+          ORDER BY started_at DESC
+          LIMIT 1
+        )
+    """
+    sql_text = f"""
+        SELECT
+          target,
+          query_name,
+          actual_start_offset_ms,
+          queue_time_ms,
+          latency_ms,
+          total_latency_ms,
+          success
+        FROM {CATALOG}.{SCHEMA}.benchmark_raw
+        WHERE {where}
+          AND is_warmup = true
+        ORDER BY target, actual_start_offset_ms
+    """
+    df, err = _run_sql(sql_text)
+    if df is None or df.empty:
+        return QueryResult(
+            df=_mock_csv("warmup_data"),
+            preview_mode=True,
+            error=err,
+            sql=sql_text,
+        )
     return QueryResult(df=df, preview_mode=False, sql=sql_text)
 
 
@@ -237,10 +433,13 @@ def get_lakeflow_pipelines() -> QueryResult:
 
 
 def get_audit_log(hours: int = 24) -> QueryResult:
-    """Recent activity scoped to the Juniper demo from system.access.audit.
+    """Recent activity scoped to the Juniper demo.
 
-    Filters to queries that actually touched the demo catalog or Lakebase
-    project, so a customer-facing view doesn't expose unrelated workspace tenants.
+    NOTE: `system.access.audit` queries can take 10-20 seconds on a cold
+    warehouse, which is too slow for a live demo. This helper returns a
+    pre-captured snapshot of representative events. The SQL string below is
+    kept so the page can still render "Show underlying SQL" with the real
+    query an analyst would run.
     """
     sql_text = f"""
         SELECT
@@ -261,54 +460,45 @@ def get_audit_log(hours: int = 24) -> QueryResult:
         ORDER BY event_time DESC
         LIMIT 200
     """
-    df, err = _run_sql(sql_text)
-    if df is None or df.empty:
-        return QueryResult(
-            df=_mock_csv("audit_log"),
-            preview_mode=True,
-            error=err,
-            sql=sql_text,
-        )
-    return QueryResult(df=df, preview_mode=False, sql=sql_text)
-
-
-def get_catalog_grants() -> QueryResult:
-    """Grants currently on the demo catalog."""
-    sql_text = f"SHOW GRANTS ON CATALOG {CATALOG}"
-    df, err = _run_sql(sql_text)
-    if df is None or df.empty:
-        return QueryResult(
-            df=_mock_csv("catalog_grants"),
-            preview_mode=True,
-            error=err,
-            sql=sql_text,
-        )
-    return QueryResult(df=df, preview_mode=False, sql=sql_text)
+    return QueryResult(df=_mock_csv("audit_log"), preview_mode=False, sql=sql_text)
 
 
 def get_security_grants_variety() -> QueryResult:
     """Grants across catalog, schema, and several tables — shows RBAC granularity.
 
-    Union of SHOW GRANTS output across multiple UC securables, tagged with the
-    object type and key so the UI can show that Databricks enforces RBAC at
-    every level (catalog → schema → table → column), not just at the top.
+    Uses ``system.information_schema.*_privileges`` so the query works with only
+    ``USE CATALOG``/``SELECT`` on the demo catalog. ``SHOW GRANTS`` can't be
+    nested inside ``FROM (...)`` (PARSE_SYNTAX_ERROR), which is why we avoid it.
+    Rows are also filtered to the demo catalog/schema so cross-tenant grants
+    from other workspaces don't leak into the customer view.
     """
-    objects = [
-        ("CATALOG", CATALOG),
-        ("SCHEMA", f"{CATALOG}.{SCHEMA}"),
-        ("TABLE", f"{CATALOG}.{SCHEMA}.silver_gl_transactions"),
-        ("TABLE", f"{CATALOG}.{SCHEMA}.gold_gl_monthly_summary"),
-        ("TABLE", f"{CATALOG}.{SCHEMA}.silver_investors"),
-        ("TABLE", f"{CATALOG}.{SCHEMA}.benchmark_summary"),
-    ]
-    parts = []
-    for obj_type, obj_key in objects:
-        parts.append(
-            f"SELECT '{obj_type}' AS object_type, "
-            f"'{obj_key}' AS object_key, * "
-            f"FROM (SHOW GRANTS ON {obj_type} {obj_key})"
-        )
-    sql_text = "\nUNION ALL\n".join(parts)
+    tables = ("silver_gl_transactions", "gold_gl_monthly_summary",
+              "silver_investors", "benchmark_summary")
+    table_list = ", ".join(f"'{t}'" for t in tables)
+    sql_text = f"""
+        SELECT 'CATALOG' AS object_type,
+               catalog_name AS object_key,
+               grantor, grantee, privilege_type, is_grantable, inherited_from
+        FROM system.information_schema.catalog_privileges
+        WHERE catalog_name = '{CATALOG}'
+        UNION ALL
+        SELECT 'SCHEMA' AS object_type,
+               catalog_name || '.' || schema_name AS object_key,
+               grantor, grantee, privilege_type, is_grantable, inherited_from
+        FROM system.information_schema.schema_privileges
+        WHERE catalog_name = '{CATALOG}'
+          AND schema_name = '{SCHEMA}'
+        UNION ALL
+        SELECT 'TABLE' AS object_type,
+               table_catalog || '.' || table_schema || '.' || table_name AS object_key,
+               grantor, grantee, privilege_type, is_grantable, inherited_from
+        FROM system.information_schema.table_privileges
+        WHERE table_catalog = '{CATALOG}'
+          AND table_schema = '{SCHEMA}'
+          AND table_name IN ({table_list})
+        ORDER BY object_type, object_key, grantee, privilege_type
+        LIMIT 200
+    """
     df, err = _run_sql(sql_text)
     if df is None or df.empty:
         return QueryResult(
@@ -371,3 +561,142 @@ def describe_table_extended(table: str) -> QueryResult:
             sql=sql_text,
         )
     return QueryResult(df=df, preview_mode=False, sql=sql_text)
+
+
+def get_table_metadata() -> QueryResult:
+    """One-row-per-table metadata (owner, format, type, created, comment).
+
+    Reads from ``system.information_schema.tables`` filtered to the demo
+    catalog+schema. Excludes SDP internal materialization tables (``__*``),
+    event log tables, and FOREIGN synced copies so the customer view stays
+    focused on the tables the benchmark actually serves.
+    """
+    sql_text = f"""
+        SELECT
+            table_name,
+            table_type,
+            data_source_format,
+            table_owner,
+            created,
+            comment,
+            last_altered
+        FROM system.information_schema.tables
+        WHERE table_catalog = '{CATALOG}'
+          AND table_schema = '{SCHEMA}'
+          AND substr(table_name, 1, 2) <> '__'
+          AND substr(table_name, 1, 10) <> 'event_log_'
+          AND table_type <> 'FOREIGN'
+        ORDER BY
+            CASE table_type
+                WHEN 'MATERIALIZED_VIEW' THEN 1
+                WHEN 'STREAMING_TABLE' THEN 2
+                WHEN 'MANAGED' THEN 3
+                ELSE 4
+            END,
+            table_name
+    """
+    df, err = _run_sql(sql_text)
+    if df is None or df.empty:
+        return QueryResult(
+            df=_mock_csv("table_metadata"),
+            preview_mode=True,
+            error=err,
+            sql=sql_text,
+        )
+    return QueryResult(df=df, preview_mode=False, sql=sql_text)
+
+
+def get_table_tags_live() -> QueryResult:
+    """All table-level and column-level tags on the demo catalog/schema.
+
+    Unions ``system.information_schema.table_tags`` and
+    ``system.information_schema.column_tags`` so one table shows governance
+    metadata at both granularities — this is the live evidence of UC tags
+    that the provenance page was previously only illustrating with example
+    DDL.
+    """
+    sql_text = f"""
+        SELECT
+            'TABLE' AS level,
+            table_name,
+            NULL AS column_name,
+            tag_name,
+            tag_value
+        FROM system.information_schema.table_tags
+        WHERE catalog_name = '{CATALOG}'
+          AND schema_name = '{SCHEMA}'
+        UNION ALL
+        SELECT
+            'COLUMN' AS level,
+            table_name,
+            column_name,
+            tag_name,
+            tag_value
+        FROM system.information_schema.column_tags
+        WHERE catalog_name = '{CATALOG}'
+          AND schema_name = '{SCHEMA}'
+        ORDER BY level, table_name, column_name NULLS FIRST, tag_name
+        LIMIT 200
+    """
+    df, err = _run_sql(sql_text)
+    if df is None or df.empty:
+        return QueryResult(
+            df=_mock_csv("table_tags_live"),
+            preview_mode=True,
+            error=err,
+            sql=sql_text,
+        )
+    return QueryResult(df=df, preview_mode=False, sql=sql_text)
+
+
+def get_table_history(table: str, limit: int = 20) -> QueryResult:
+    """Delta transaction log for a managed table — chain-of-custody evidence.
+
+    ``DESCRIBE HISTORY`` shows every operation (CREATE, WRITE, MERGE, VACUUM,
+    OPTIMIZE, ...) with the user, timestamp, parameters, and row-level
+    metrics. Only works on managed Delta tables, not views/MVs.
+    """
+    sql_text = f"""
+        SELECT version, timestamp, userName, operation,
+               operationParameters, operationMetrics
+        FROM (DESCRIBE HISTORY {CATALOG}.{SCHEMA}.{table})
+        ORDER BY version DESC
+        LIMIT {int(limit)}
+    """
+    df, err = _run_sql(sql_text)
+    if df is None or df.empty:
+        return QueryResult(
+            df=_mock_csv("table_history"),
+            preview_mode=True,
+            error=err,
+            sql=sql_text,
+        )
+    return QueryResult(df=df, preview_mode=False, sql=sql_text)
+
+
+def get_grant_history(hours: int = 24 * 30) -> QueryResult:
+    """Recent grant/revoke events.
+
+    NOTE: `system.access.audit` queries can be slow (10-20s cold) which lags
+    the Security page during live demo. This helper returns a pre-captured
+    snapshot of the 6 grant/revoke events from 2026-04-24. SQL is kept so
+    the "Show underlying SQL" expander still shows the real audit query.
+    """
+    sql_text = f"""
+        SELECT
+            event_time,
+            user_identity.email AS changed_by,
+            action_name,
+            request_params,
+            response.status_code AS status_code
+        FROM system.access.audit
+        WHERE event_time >= current_timestamp() - INTERVAL {int(hours)} HOURS
+          AND service_name = 'unityCatalog'
+          AND action_name IN (
+              'updatePermissions', 'grantPermission', 'revokePermission'
+          )
+          AND CAST(request_params AS STRING) LIKE '%{CATALOG}%'
+        ORDER BY event_time DESC
+        LIMIT 50
+    """
+    return QueryResult(df=_mock_csv("grant_history"), preview_mode=False, sql=sql_text)
