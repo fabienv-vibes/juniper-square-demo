@@ -31,6 +31,7 @@ import statistics
 import subprocess
 import sys
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
@@ -125,13 +126,24 @@ def get_lakebase_connection(config: dict):
     )
 
 
+def _cache_buster() -> str:
+    """Return a one-line SQL comment with a unique nonce.
+
+    Appended to every query so the DBSQL result-cache key (which hashes the
+    full statement text) never matches a prior execution. Without this, the
+    fund_id pool cycles fast enough that ~all queries after the first 120
+    served from result cache (~3 ms) instead of gold-table execution.
+    """
+    return f"\n-- cache_buster nonce={uuid.uuid4().hex}\n"
+
+
 def run_single_query_dbsql(config: dict, query: str) -> float:
     """Execute a single query on DBSQL and return latency in ms."""
     conn = get_dbsql_connection(config)
     try:
         cursor = conn.cursor()
         start = time.perf_counter()
-        cursor.execute(query)
+        cursor.execute(query + _cache_buster())
         cursor.fetchall()
         elapsed_ms = (time.perf_counter() - start) * 1000
         cursor.close()
@@ -195,6 +207,17 @@ def substitute_arena_id(sql: str, arena_pool: list[str]) -> str:
     return sql.replace("{arena_id}", random.choice(arena_pool))
 
 
+def substitute_fund_id(sql: str, fund_pool: list[str]) -> str:
+    """Replace '{fund_id}' in the SQL with a random fund from the pool.
+
+    Same shape as substitute_arena_id. Used by Q8 to defeat result-cache hits
+    on otherwise-identical fund-scoped queries.
+    """
+    if not fund_pool or "{fund_id}" not in sql:
+        return sql
+    return sql.replace("{fund_id}", random.choice(fund_pool))
+
+
 # ---------------------------------------------------------------------------
 # Benchmark engine
 # ---------------------------------------------------------------------------
@@ -256,15 +279,17 @@ def benchmark_level(
     iterations: int,
     warmup: int = 0,
     arena_pool: Optional[list[str]] = None,
+    fund_pool: Optional[list[str]] = None,
 ) -> tuple[list[QueryResult], list[LevelSummary]]:
     """Run all queries at a given concurrency level for N iterations.
 
-    `queries` should already be weight-expanded. arena_id substitution happens
-    per-execution (each submitted future gets its own random arena).
+    `queries` should already be weight-expanded. {arena_id} / {fund_id}
+    substitution happens per-execution so each future gets its own values.
     """
     all_results: list[QueryResult] = []
     total_rounds = warmup + iterations
     arena_pool = arena_pool or []
+    fund_pool = fund_pool or []
 
     for i in range(total_rounds):
         is_warmup = i < warmup
@@ -278,8 +303,10 @@ def benchmark_level(
                 # Round-robin queries across threads (queries list is already weight-expanded)
                 q = queries[thread_id % len(queries)]
                 query_sql = q[f"sql_{target}"] if f"sql_{target}" in q else q["sql"]
-                # Substitute {arena_id} per execution so each future gets its own arena
+                # Substitute {arena_id} + {fund_id} per execution so each future
+                # gets its own values (also defeats result-cache hits on Q8-shape).
                 query_sql = substitute_arena_id(query_sql, arena_pool)
+                query_sql = substitute_fund_id(query_sql, fund_pool)
                 future = executor.submit(
                     run_query_task,
                     config,
@@ -382,6 +409,7 @@ def benchmark_sustained(
     warmup_s: int,
     arrival_distribution: str = "poisson",
     arena_pool: Optional[list[str]] = None,
+    fund_pool: Optional[list[str]] = None,
 ) -> tuple[list[QueryResult], list[LevelSummary], list[TimeseriesBucket]]:
     """Run sustained-rate workload for fixed wall-clock duration.
 
@@ -393,6 +421,7 @@ def benchmark_sustained(
     Returns: (raw results, per-query summary, time-series buckets).
     """
     arena_pool = arena_pool or []
+    fund_pool = fund_pool or []
     total_duration_s = warmup_s + duration_s
 
     # Build the full arrival schedule (warmup + measurement) up-front
@@ -480,6 +509,7 @@ def benchmark_sustained(
             q = queries[i % len(queries)]
             query_sql = q[f"sql_{target}"] if f"sql_{target}" in q else q["sql"]
             query_sql = substitute_arena_id(query_sql, arena_pool)
+            query_sql = substitute_fund_id(query_sql, fund_pool)
 
             executor.submit(_worker, q["name"], query_sql, scheduled_offset, actual_start, is_warmup)
             submitted += 1
@@ -1031,6 +1061,7 @@ def main():
     warmup = args.warmup if args.warmup is not None else bench_config.get("warmup", 1)
     raw_queries = config["queries"]
     arena_pool = config.get("arena_id_pool", []) or []
+    fund_pool = config.get("fund_id_pool", []) or []
 
     # Sustained-mode parameter resolution from named scenario + CLI overrides
     sustained_scenarios = config.get("sustained_scenarios", {}) or {}
@@ -1097,6 +1128,7 @@ def main():
     for name, count in mix_counts.items():
         print(f"              {name}: x{count}")
     print(f"  Arena pool: {len(arena_pool)} arenas" + (f" (e.g. {arena_pool[0]})" if arena_pool else ""))
+    print(f"  Fund pool:  {len(fund_pool)} funds"   + (f" (e.g. {fund_pool[0]})"  if fund_pool  else ""))
     print(f"  Output:     {output_dir}")
     print(f"  Delta:      {'SKIPPED' if args.skip_delta_write else 'enabled'}")
     print(f"{'='*60}\n")
@@ -1119,6 +1151,7 @@ def main():
                 results, summaries = benchmark_level(
                     config, target, target_queries, level, iterations, warmup,
                     arena_pool=arena_pool,
+                    fund_pool=fund_pool,
                 )
                 all_results.extend(results)
                 all_summaries.extend(summaries)
@@ -1131,6 +1164,7 @@ def main():
                 warmup_s=warmup_seconds,
                 arrival_distribution=arrival_dist,
                 arena_pool=arena_pool,
+                fund_pool=fund_pool,
             )
             all_results.extend(results)
             all_summaries.extend(summaries)

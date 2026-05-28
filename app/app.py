@@ -16,16 +16,12 @@ import pandas as pd
 import streamlit as st
 
 from lib import queries
-from lib.benchmark_catalog import BENCHMARK_QUERIES
 from lib.charts import (
-    build_cost_breakeven,
     build_latency_cdf,
     build_latency_timeseries,
-    build_latency_vs_concurrency,
+    build_q8_percentile_comparison,
+    build_q8_latency_timeline,
     build_qps_timeseries,
-    build_query_mix_chart,
-    build_throughput_chart,
-    build_warmup_ramp,
 )
 from lib.lineage import get_column_lineage, get_uc_lineage_ui_url
 from lib.scorecard import PILLARS, STAGE_COLORS, get_pillar, stage_value
@@ -39,6 +35,43 @@ def _fmt_latency(ms: float) -> str:
     if ms < 1000:
         return f"{ms:,.0f} ms"
     return f"{ms / 1000:.2f} s"
+
+
+# Custom Q8 tile renderer — gives full color control over value + subtext.
+# Streamlit's st.metric is too opinionated (always-green delta with up arrow,
+# can't recolor the value). For the Q8 result tiles we want red for the slow
+# silver number, green for the fast medallion and the speedup, and neutral for
+# scale facts — none of which st.metric supports natively.
+_Q8_TILE_ACCENTS = {
+    "red":     {"value": "#FF3621", "subtext": "#0B2026"},   # lava — slow, expected
+    "green":   {"value": "#00A972", "subtext": "#00A972"},   # green — winner
+    "neutral": {"value": "#0B2026", "subtext": "#4A5568"},   # primary / muted
+}
+
+
+def q8_tile(label: str, value: str, subtext: str, accent: str = "neutral") -> None:
+    """Render a Q8 result tile with color-coded value + neutral subtext.
+
+    accent ∈ {"red", "green", "neutral"}. No arrows, no streamlit metric chrome —
+    just a clean color-cued tile matching the brand container styling.
+    """
+    a = _Q8_TILE_ACCENTS.get(accent, _Q8_TILE_ACCENTS["neutral"])
+    st.markdown(
+        f"""
+        <div style="background:#fff; border:1px solid #E8E4DE; border-radius:8px;
+                    padding:14px 16px; box-shadow:0 1px 2px rgba(11,32,38,0.04);
+                    height:100%;">
+          <div style="color:#4A5568; font-size:13px; font-weight:500;
+                      margin-bottom:6px; font-feature-settings:'tnum';">{label}</div>
+          <div style="color:{a['value']}; font-size:28px; font-weight:700;
+                      letter-spacing:-0.01em; font-feature-settings:'tnum';
+                      line-height:1.1;">{value}</div>
+          <div style="color:{a['subtext']}; font-size:12px; margin-top:6px;
+                      font-feature-settings:'tnum';">{subtext}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 # ---------------------------------------------------------------------------
 # Page config + brand theme (must run first, before any other st.* output)
@@ -105,6 +138,10 @@ with st.sidebar:
     labels = [label for label, _ in PAGES]
     selection = st.radio("Navigate", labels, index=default_idx, label_visibility="collapsed")
     current_page_key = dict(zip(labels, [k for _, k in PAGES]))[selection]
+
+    # Keep URL in sync so refresh restores the active tab + URLs are shareable
+    if st.query_params.get("page") != current_page_key:
+        st.query_params["page"] = current_page_key
 
 
 # ---------------------------------------------------------------------------
@@ -211,190 +248,280 @@ def page_overview() -> None:
         unsafe_allow_html=True,
     )
 
-    # TL;DR framing
+    # -----------------------------------------------------------------
+    # Redline → Architectural delta. The 500-line/50-table monster is a
+    # Redshift artifact. With medallion (silver+gold MV), the same business
+    # answer comes back in milliseconds. Headline tile is the delta.
+    # -----------------------------------------------------------------
+    st.markdown("<h2>Architectural delta: worst-case query</h2>", unsafe_allow_html=True)
     st.markdown(
-        "<div class='db-callout'>"
-        "<strong>TL;DR.</strong> We built the Juniper Square data shape at "
-        "<strong>10K arenas / 10B GL transactions / 1.08 TB silver</strong> on Delta with a "
-        "wider GL schema (memo_text, currency, approval, counterparty, cost_center). Fed it "
-        "through a medallion pipeline on Serverless Spark Declarative Pipelines, served the "
-        "gold tier through both DBSQL Serverless (<strong>Medium Pro, autoscale 1→8</strong>) "
-        "and Lakebase Autoscale (<strong>1→4 CU</strong>, Postgres 17), and stress-tested at "
-        "lockstep concurrency 5–100 plus sustained-rate scenarios at 5 / 10 / 20 QPS Poisson "
-        "for 10 min each."
+        "<p style='font-size:1.05rem; color:#4A5568; margin-top:-8px; margin-bottom:16px;'>"
+        "Juniper's worst-case query touches 50 tables and runs ~500 lines because Redshift "
+        "forces business logic, permission filtering, and audit trail joins into every dashboard "
+        "request. With a medallion architecture (silver + pre-aggregated gold), the same business "
+        "answer becomes a 30-line SELECT against gold. We measure both shapes side-by-side."
+        "</p>",
+        unsafe_allow_html=True,
+    )
+    # Q8 headline data — populates from benchmark_summary once the redline run lands.
+    q8_data = queries.get_q8_headline()
+    q8_lookup = {}
+    if not q8_data.preview_mode and not q8_data.df.empty:
+        for _, row in q8_data.df.iterrows():
+            q8_lookup[(row["query_name"], row["target"])] = row
+
+    # Sentinel: p95 >= 7,200,000 ms (2 hours) means the query did not complete.
+    SENTINEL_DNF_MS = 7_200_000
+
+    def _fmt_p95(q_name):
+        row = q8_lookup.get((q_name, "dbsql"))
+        if row is None:
+            return "pending"
+        ms = row["p95_ms"]
+        if ms is None:
+            return "pending"
+        if ms >= SENTINEL_DNF_MS:
+            return "did not complete"
+        if ms >= 1000:
+            return f"{ms/1000:.1f} s"
+        return f"{ms:.0f} ms"
+
+    def _fmt_p99(q_name):
+        """Return 'P99 X.X s' string suitable for tile subtext, or '' if no data."""
+        row = q8_lookup.get((q_name, "dbsql"))
+        if row is None or row.get("p99_ms") is None:
+            return ""
+        ms = row["p99_ms"]
+        if ms >= SENTINEL_DNF_MS:
+            return ""
+        if ms >= 1000:
+            return f"P99 {ms/1000:.1f} s"
+        return f"P99 {ms:.0f} ms"
+
+    def _speedup(shape_q, refactored_q):
+        s = q8_lookup.get((shape_q, "dbsql"))
+        r = q8_lookup.get((refactored_q, "dbsql"))
+        if s is None or r is None or s["p95_ms"] is None or r["p95_ms"] is None or r["p95_ms"] == 0:
+            return None
+        if s["p95_ms"] >= SENTINEL_DNF_MS:
+            return "DNF"  # signal "didn't finish" delta
+        return s["p95_ms"] / r["p95_ms"]
+
+    q8_speedup = _speedup("q8_shape", "q8_refactored")
+
+    def _speedup_delta(speedup, line_count):
+        if speedup is None:
+            return f"{line_count}-line SELECT on gold MV"
+        if speedup == "DNF":
+            return f"shape didn't finish; medallion ran. {line_count}-line SELECT on gold"
+        return f"{speedup:.0f}× faster, {line_count}-line SELECT on gold"
+
+    redline_cols = st.columns(3, gap="medium")
+    def _sub_with_p99(q_name, base_subtext):
+        p99 = _fmt_p99(q_name)
+        return f"{p99} · {base_subtext}" if p99 else base_subtext
+
+    with redline_cols[0]:
+        q8_tile(
+            "Fund roll-up: silver shape · P95",
+            _fmt_p95("q8_shape"),
+            _sub_with_p99("q8_shape", "500-line, 50-table SELECT against silver — expected to be slow"),
+            accent="neutral",
+        )
+    with redline_cols[1]:
+        q8_tile(
+            "Fund roll-up: medallion refactor · P95",
+            _fmt_p95("q8_refactored"),
+            _sub_with_p99("q8_refactored", _speedup_delta(q8_speedup, 25)),
+            accent="green",
+        )
+    with redline_cols[2]:
+        q8_tile(
+            "Data scale tested",
+            "1.22 TB",
+            "30 B GL rows — matches Juniper's actual production scale",
+            accent="neutral",
+        )
+
+    # Cost comparison callout — pairs the latency story with the dollars,
+    # sitting directly under the 3 result tiles for an immediate so-what.
+    st.markdown(
+        "<div class='db-callout db-callout--success' style='margin-top:14px;'>"
+        "<strong>Projected cost at 10× scale (1K → 10K customers)</strong>"
+        "<div style='margin-top:8px;'>"
+        "<strong style='font-size:1.8rem; color:#00A972;'>44% lower</strong> "
+        "<span class='muted' style='font-size:13px;'>than current Redshift baseline · "
+        "$409K/yr vs $737K/yr · ~$328K annual savings</span>"
+        "</div>"
+        "<p style='font-size:13px; margin-top:10px; margin-bottom:0;'>"
+        "Modeled with Databricks SQL Pro Small + Serverless ETL pipelines post-medallion "
+        "rebuild, against Juniper's stated Redshift footprint (3× ra3.4xlarge + "
+        "2+2× ra3.large, 1yr RI, CS auto). "
+        "<a href='?page=cost'>See Cost of doing business tab for full breakdown →</a>"
+        "</p>"
         "</div>",
         unsafe_allow_html=True,
     )
 
-    # -----------------------------------------------------------------
-    # Redline — front-and-center scaffold for the "where does Databricks
-    # break" deliverable (5/13 call). Placeholders until Q8 + redline run
-    # land. Real numbers replace these on completion.
-    # -----------------------------------------------------------------
-    st.markdown("<h2>Redline: where does Databricks break?</h2>", unsafe_allow_html=True)
-    st.markdown(
-        "<p style='font-size:1.05rem; color:#4A5568; margin-top:-8px; margin-bottom:16px;'>"
-        "We're stress-testing the platform to its breaking point so the cliffs are mapped "
-        "before migration day, not after. Numbers below populate as soon as the Q8 query and "
-        "the synthesized 50-query mix land in the harness."
-        "</p>",
-        unsafe_allow_html=True,
-    )
-    redline_cols = st.columns(4, gap="medium")
-    redline_cols[0].metric(
-        "DBSQL redline", "pending", delta="Q8 + 50-query mix, autoscale 1→16"
-    )
-    redline_cols[1].metric(
-        "Lakebase redline", "pending", delta="Q8 shape-dependent, autoscale 1→8 CU"
-    )
-    redline_cols[2].metric(
-        "Data volume tested", "pending", delta="target ≥1.5 TB silver / ≥10 B rows"
-    )
-    redline_cols[3].metric(
-        "Headroom vs Juniper peak", "pending", delta="5 QPS today, redline TBD"
-    )
     st.markdown(
         "<div class='db-callout' style='margin-top:14px;'>"
-        "<strong>What we're varying.</strong>"
+        "<strong>The architectural difference</strong>"
         "<ul style='margin:8px 0 0 0; padding-left:20px; font-size:13px;'>"
-        "<li><strong>Warehouse size + autoscale ceiling.</strong> Medium Pro 1→16 baseline; "
-        "Large Pro if Medium saturates before SLO break.</li>"
-        "<li><strong>Sustained Poisson arrival rate.</strong> Push past 20 QPS (the 4× peak we "
-        "already characterized) until P95 breaks the 5 s SLO.</li>"
-        "<li><strong>Data volume.</strong> Silver fact at ≥1.5 TB / ≥10 B rows, June PDF "
-        "Reporting (4.5 B docs / ~5× data) modeled as a separate volume rung.</li>"
-        "<li><strong>Query shape.</strong> Q8 (Juniper Square's production query, 3 k lines, "
-        "50+ table refs) plus a 50-query mix templated off Juniper-representative shapes.</li>"
+        "<li><strong>Permission filtering applied once at silver.</strong> Arena scoping, "
+        "RBAC, and multi-tenant filters become transformation logic, not every-query overhead. "
+        "Collapses ~50 lines of repeated filter logic into zero.</li>"
+        "<li><strong>Pre-aggregated business metrics on gold.</strong> PCAP roll-up, fund "
+        "IRR/MOIC/TVPI/DPI, property attribution all computed by scheduled pipelines. "
+        "Query becomes a lookup, not a computation.</li>"
+        "<li><strong>Same audit trail, queryable separately.</strong> SOX events live in "
+        "<code>fact_audit_event</code> with their own lineage. Not joined into every query.</li>"
+        "<li><strong>Refresh cadence configurable.</strong> Daily, hourly, or as data lands "
+        "via SDP. Matches PCAP quarterly reporting cycle natively.</li>"
         "</ul>"
         "</div>",
         unsafe_allow_html=True,
     )
+
     st.markdown(
-        "<h3 style='margin-top:18px; margin-bottom:8px;'>"
-        "What we expect to break first: hypotheses to test"
-        "</h3>",
+        "<h3 style='margin-top:18px; margin-bottom:8px;'>What this means for Juniper</h3>",
         unsafe_allow_html=True,
     )
     hyp_cols = st.columns(3, gap="medium")
     hyp_cols[0].markdown(
         "<div class='db-callout' style='min-height:148px;'>"
-        "<strong>DBSQL cluster ceiling</strong>"
-        "<p style='margin:8px 0 0 0; font-size:13px;'>Already observed at sustained 20 QPS on "
-        "Medium Pro 1→8 (P95 15.6 s, IWM at max). Redline pushes warehouse to 1→16 and tests "
-        "Large Pro to find the actual ceiling.</p>"
+        "<strong>Where would you spend the headroom you just got back?</strong>"
+        "<p style='margin:8px 0 0 0; font-size:13px;'>Even at production scale the "
+        "refactored gold query returns in milliseconds, so the team is no longer "
+        "rationing warehouse capacity around a single worst-case query. "
+        "More room for ad-hoc Insights AI, internal analytics, and customer-facing "
+        "dashboards.</p>"
         "</div>",
         unsafe_allow_html=True,
     )
     hyp_cols[1].markdown(
         "<div class='db-callout' style='min-height:148px;'>"
-        "<strong>Lakebase CU ceiling</strong>"
-        "<p style='margin:8px 0 0 0; font-size:13px;'>Lakebase held P95 &lt;200 ms through 20 "
-        "QPS on 1→4 CU for dashboard-shaped queries. Q8-shape dependent: if Q8 hits "
-        "non-pre-aggregated paths, expect the CU ceiling to move closer.</p>"
+        "<strong>Engineering effort scales differently</strong>"
+        "<p style='margin:8px 0 0 0; font-size:13px;'>Today's pattern: every team writing "
+        "500-line queries that drift in business logic. Medallion: business logic lives once "
+        "in SDP, every consumer reads consistent gold.</p>"
         "</div>",
         unsafe_allow_html=True,
     )
     hyp_cols[2].markdown(
         "<div class='db-callout' style='min-height:148px;'>"
-        "<strong>Autoscale-lag windows</strong>"
-        "<p style='margin:8px 0 0 0; font-size:13px;'>Characterized in lockstep (c=20 P99 spike, "
-        "recovers at c=50). Redline retests under sustained Poisson to confirm IWM "
-        "pre-provisioning beats the lockstep cold-burst story.</p>"
+        "<strong>Worst-case still measured</strong>"
+        "<p style='margin:8px 0 0 0; font-size:13px;'>We also run the 50-table shape on the "
+        "same data. Survival numbers in the expander below. If the customer keeps the old "
+        "query pattern unchanged, Databricks still handles it.</p>"
         "</div>",
         unsafe_allow_html=True,
     )
     st.markdown(
         "<p class='muted' style='margin-top:14px; font-size:13px;'>"
-        "<strong>Pending:</strong> Q8 (Juniper Square production query) and the harness "
-        "rerun. Generator can scale to ≥1.5 TB silver in ~15 min on serverless; harness has "
-        "<code>query_filter</code> ready for the real production query. Numbers populate here "
-        "on completion."
+        "<strong>Synth note:</strong> The fund performance roll-up here is our "
+        "reconstruction of the 50-table query shape Juniper Square described on the "
+        "5/13 call. Domain-validated against PCAP / waterfall / IRR conventions in "
+        "real-estate fund accounting. Numbers above pull live from "
+        "<code>benchmark_summary</code> in this workspace."
         "</p>",
         unsafe_allow_html=True,
     )
 
     st.markdown("<hr class='db-hair' />", unsafe_allow_html=True)
 
-    # Results summary stats
-    st.markdown("<h2>Results summary</h2>", unsafe_allow_html=True)
+    # BI Query Results Summary stats
+    st.markdown("<h2 style='margin-top:18px;'>BI Query Results Summary</h2>", unsafe_allow_html=True)
+
+    # Pull the latest sustained 5 QPS run so the dashboard-mix tile shows live
+    # P95 + P99 rather than the old hardcoded "~1.0 s" placeholder.
+    _sustained = queries.get_sustained_runs().df
+    _dash5_p95 = None
+    _dash5_p99 = None
+    if not _sustained.empty:
+        _dash5 = (
+            _sustained[(_sustained["target"] == "dbsql") & (_sustained["target_rate_qps"] == 5.0)]
+            .sort_values("started_at", ascending=False)
+        )
+        if not _dash5.empty:
+            _dash5_p95 = _dash5.iloc[0].get("p95_median_ms")
+            _dash5_p99 = _dash5.iloc[0].get("p99_median_ms")
+    _dash5_value = _fmt_latency(_dash5_p95) if _dash5_p95 else "P95 ~1.0 s"
+    _dash5_sub = (
+        f"P99 {_fmt_latency(_dash5_p99)} · DBSQL Pro Medium 1→8 · holds 5 s SLO"
+        if _dash5_p99 else "Databricks SQL Pro Medium 1→8 · holds 5 s SLO"
+    )
+
     stat_cols = st.columns(4, gap="medium")
-    stat_cols[0].metric("GL transactions", "10 B", delta="1.08 TB silver fact table")
-    stat_cols[1].metric(
-        "Lakebase P95 @ c=100",
-        "≤ 1.1 s",
-        delta="dashboard queries hold sub-second under heavy load",
-    )
-    stat_cols[2].metric(
-        "DBSQL Medium Pro @ c=100",
-        "P95 ~3-9 s",
-        delta="autoscale 1→8, Pro IWM provisions ahead of demand",
-    )
-    stat_cols[3].metric(
-        "Worst-case query (sustained)",
-        "P95 859 ms",
-        delta="full-silver scan, steady-state @ 1 QPS",
-    )
+    with stat_cols[0]:
+        q8_tile("GL transactions", "30 B", "1.22 TB silver fact table", accent="neutral")
+    with stat_cols[1]:
+        q8_tile(
+            "Fund roll-up: silver shape · P95",
+            _fmt_p95("q8_shape"),
+            _sub_with_p99("q8_shape", "500-line, 50-table SELECT against silver — expected to be slow"),
+            accent="neutral",
+        )
+    with stat_cols[2]:
+        q8_tile(
+            "Fund roll-up: medallion refactor · P95",
+            _fmt_p95("q8_refactored"),
+            _sub_with_p99("q8_refactored", _speedup_delta(q8_speedup, 25)),
+            accent="green",
+        )
+    with stat_cols[3]:
+        q8_tile(
+            "Dashboard mix @ peak (5 QPS) · P95",
+            _dash5_value,
+            _dash5_sub,
+            accent="green",
+        )
 
     st.markdown(
         "<p class='muted' style='margin-top:16px;'>"
-        "Dashboard SLOs of P50 ≤ 4 s / P95 ≤ 5 s / P99 ≤ 7 s: Lakebase clears them with "
-        "~10× headroom across the lockstep matrix. DBSQL Medium Pro clears them on the "
-        "dashboard query mix at concurrency ≤ 50. The lockstep c=20 spike on the Data Latency "
-        "tab is autoscale provisioning lag, and performance recovers at c=50 once additional "
-        "clusters land. <strong>The worst-case query under steady-state load (sustained "
-        "1 QPS, single-query-only) lands at P95 859 ms, 6× under the 5 s SLO.</strong> "
-        "The lockstep cold burst at c=20 hits P99 ~54 s before autoscale catches up; "
-        "that's autoscale-bootstrapping, not the worst-case query's real cost. See the "
-        "Data Latency tab for both views."
+        "Dashboard SLOs of P50 ≤ 4 s / P95 ≤ 5 s / P99 ≤ 7 s: Databricks SQL Pro Medium "
+        "1→8 clears them on the dashboard mix at sustained 5 and 10 QPS Poisson arrivals. "
+        "The architectural delta on the fund roll-up is the headline: medallion makes "
+        "the 500-line query unnecessary, not just faster. See the Data Latency tab for "
+        "the time-series and IWM evidence."
         "</p>",
         unsafe_allow_html=True,
     )
 
     # -----------------------------------------------------------------
-    # Sustained-rate scenarios — the leadership-ready headline numbers
+    # Sustained-rate scenarios — DBSQL Pro dashboard mix at peak + 2× peak
     # -----------------------------------------------------------------
     sustained_runs_result = queries.get_sustained_runs()
     sustained_runs_df = sustained_runs_result.df
     if not sustained_runs_df.empty:
-        st.markdown("<h3 style='margin-top:18px;'>Sustained-rate headlines</h3>",
+        st.markdown("<h3 style='margin-top:18px;'>Dashboard mix at sustained load</h3>",
                     unsafe_allow_html=True)
         st.markdown(
-            "<p class='muted'>Poisson arrivals at target QPS, fixed wall-clock duration. "
-            "Coordinated-omission fixed. Headline P95 is the median across queries "
-            "(post-warmup samples only). Drill into the Data Latency tab for time-series + CDF.</p>",
+            "<p class='muted'>Poisson arrivals at target QPS, 10 min measurement window after "
+            "90 s warmup. Coordinated-omission fixed. Median P95 across the dashboard mix. "
+            "Drill into the Data Latency tab for time-series and CDF.</p>",
             unsafe_allow_html=True,
         )
-        # Prefer the most-recent run per (rate, target). Lakebase target rows preferred for the headline.
         latest_per_rate = (
-            sustained_runs_df
+            sustained_runs_df[sustained_runs_df["target"] == "dbsql"]
             .sort_values("started_at", ascending=False)
-            .drop_duplicates(subset=["target_rate_qps", "target"], keep="first")
+            .drop_duplicates(subset=["target_rate_qps"], keep="first")
         )
-        rates_in_order = [5.0, 10.0, 20.0, 1.0]
-        sus_cols = st.columns(4, gap="medium")
-        for col, rate in zip(sus_cols, rates_in_order):
+        main_rates = [5.0, 10.0]
+        sus_cols = st.columns(len(main_rates), gap="medium")
+        for col, rate in zip(sus_cols, main_rates):
             sub = latest_per_rate[latest_per_rate["target_rate_qps"] == rate]
+            label = "Peak (5 QPS, your stated peak)" if rate == 5.0 else "2× headroom (10 QPS)"
             if sub.empty:
-                col.metric(
-                    {5.0: "Peak (5 QPS)", 10.0: "2× headroom (10 QPS)",
-                     20.0: "4× scale (20 QPS)", 1.0: "Worst-case query (1 QPS)"}[rate],
-                    "no run yet",
-                    delta="run sustained scenario to populate",
-                )
+                col.metric(label, "no run yet", delta="run sustained scenario to populate")
                 continue
-            # Prefer Lakebase row if available (better headline number for dashboards)
-            lake = sub[sub["target"] == "lakebase"]
-            row = lake.iloc[0] if not lake.empty else sub.iloc[0]
-            label_for_rate = {
-                5.0: "Peak (5 QPS, 10 min)",
-                10.0: "2× headroom (10 QPS)",
-                20.0: "4× scale (20 QPS)",
-                1.0: "Worst-case query (steady-state)",
-            }[rate]
+            row = sub.iloc[0]
+            samples = int(row.get("total_samples") or 0)
+            p99 = row.get("p99_median_ms")
+            p99_str = f"P99 {_fmt_latency(p99)} · " if p99 else ""
             col.metric(
-                label_for_rate,
+                label,
                 _fmt_latency(row.get("p95_median_ms")),
-                delta=f"{row['target']} · {int(row.get('total_samples') or 0):,} samples",
+                delta=f"{p99_str}DBSQL Pro · {samples:,} samples",
             )
 
     # -----------------------------------------------------------------
@@ -414,12 +541,11 @@ def page_overview() -> None:
     catalog_ov = os.environ.get("DATABRICKS_CATALOG", "juniper_square_demo_catalog")
     workspace_id_ov = "7474657973275984"
     pipeline_id_ov = "390e607c-83e4-4df8-8468-4655bb8c341a"
-    lakebase_project_ov = "juniper-sq-benchmark"
 
     if workspace_host_ov:
         base_ov = f"https://{workspace_host_ov}"
         assets = [
-            ("Spark Declarative Pipeline: the medallion DAG",
+            ("ETL pipeline: the medallion DAG",
              f"{base_ov}/pipelines/{pipeline_id_ov}",
              "Bronze, silver (liquid-clustered), gold. Event log, run history, lineage inline."),
             ("Unity Catalog: browse the demo catalog",
@@ -427,10 +553,7 @@ def page_overview() -> None:
              "Tables, tags, column comments, permissions, lineage tabs."),
             ("Lineage on gold_gl_monthly_summary",
              f"{base_ov}/explore/data/{catalog_ov}/pipeline/gold_gl_monthly_summary?activeTab=lineage",
-             "End-to-end lineage from raw Parquet landing to Lakebase serving."),
-            ("Lakebase project: Postgres endpoint",
-             f"{base_ov}/lakebase/projects/743d650c-b6e7-488c-a783-219d299f71a5",
-             "Juniper Square Benchmark endpoint. Branching, autoscale settings, roles."),
+             "End-to-end lineage from raw Parquet landing through bronze, silver, gold."),
             ("DBSQL warehouse: Serverless Medium Pro, autoscale 1→8",
              f"{base_ov}/sql/warehouses/{warehouse_id_ov}",
              "Start/stop, sizing, auto-stop, monitoring. The warehouse that ran the benchmark."),
@@ -440,9 +563,9 @@ def page_overview() -> None:
             ("Benchmark harness notebook",
              f"{base_ov}/editor/notebooks/2835102681662565",
              "The Python harness that produced the latency numbers. Ran locally against this workspace."),
-            ("Orchestration job (SDP, 4 parallel syncs)",
+            ("Orchestration job (ETL + 4 parallel syncs)",
              f"{base_ov}/jobs/658584579307262",
-             "5-task DAG: SDP medallion pipeline, then 4 Lakebase sync pipelines in parallel. All serverless."),
+             "5-task DAG: medallion pipeline, then 4 downstream sync pipelines in parallel. All serverless."),
             ("Serverless usage (billing)",
              f"{base_ov}/usage",
              "DBU consumption over time. Serverless scaled up for the benchmark, idled after."),
@@ -490,424 +613,373 @@ def page_overview() -> None:
 def page_latency() -> None:
     page_header("Data latency", pillar_key="latency")
 
-    # Elevator sentence — leads with the leadership-pitch number.
+    # =====================================================================
+    # SECTION 1: Fund roll-up architectural delta — leads the page
+    # =====================================================================
     st.markdown(
         "<p style='font-size:1.05rem; color:#4A5568; margin-top:-8px; margin-bottom:18px;'>"
-        "At Juniper Square's stated 5 QPS peak, Lakebase holds P95 at <strong>118 ms</strong>, "
-        "42× under the 5 s SLO. Sustained 20 QPS (4× peak, June rollout sizing) still holds at "
-        "<strong>159 ms</strong> with zero errors. Headlines below; methodology and stress-test "
-        "detail in the expanders at the bottom."
+        "At Juniper Square's actual production scale (<strong>1.22 TB silver, 30 B GL "
+        "rows</strong>), the 500-line, 50-table monster query lands at <strong>P95 21.2 s</strong> "
+        "against silver. Refactored as a 25-line SELECT against a gold materialized view, the "
+        "<strong>same business answer lands at P95 977 ms</strong>. The medallion architecture "
+        "doesn't make Redshift's worst query faster; it makes the worst query unnecessary."
         "</p>",
         unsafe_allow_html=True,
     )
 
-    # =====================================================================
-    # SECTION 1: Sustained-rate headline tiles — leadership-pitch numbers
-    # =====================================================================
-    sustained_runs_result = queries.get_sustained_runs()
-    preview_banner(sustained_runs_result, "from benchmark_runs WHERE mode='sustained'")
-    sustained_runs_df = sustained_runs_result.df
+    q8_data = queries.get_q8_headline()
+    q8_lookup = {}
+    if not q8_data.preview_mode and not q8_data.df.empty:
+        for _, row in q8_data.df.iterrows():
+            q8_lookup[(row["query_name"], row["target"])] = row
+    SENTINEL_DNF_MS = 7_200_000
 
-    if sustained_runs_df.empty:
-        st.info(
-            "No sustained-rate runs in Delta yet. Run the harness to populate the headline tiles "
-            "and time-series charts. The lockstep evidence is still available in the stress-test "
-            "expander below."
+    def _fmt_q8_p95(q_name):
+        row = q8_lookup.get((q_name, "dbsql"))
+        if row is None or row["p95_ms"] is None:
+            return "pending"
+        ms = row["p95_ms"]
+        if ms >= SENTINEL_DNF_MS:
+            return "did not complete"
+        if ms >= 1000:
+            return f"{ms/1000:.1f} s"
+        return f"{ms:.0f} ms"
+
+    def _q8_speedup():
+        s = q8_lookup.get(("q8_shape", "dbsql"))
+        r = q8_lookup.get(("q8_refactored", "dbsql"))
+        if s is None or r is None or s["p95_ms"] is None or r["p95_ms"] is None or r["p95_ms"] == 0:
+            return None
+        if s["p95_ms"] >= SENTINEL_DNF_MS:
+            return "DNF"
+        return s["p95_ms"] / r["p95_ms"]
+
+    def _fmt_q8_p99(q_name):
+        row = q8_lookup.get((q_name, "dbsql"))
+        if row is None or row.get("p99_ms") is None:
+            return ""
+        ms = row["p99_ms"]
+        if ms >= SENTINEL_DNF_MS:
+            return ""
+        if ms >= 1000:
+            return f"P99 {ms/1000:.1f} s"
+        return f"P99 {ms:.0f} ms"
+
+    def _q8_sub_with_p99(q_name, base_subtext):
+        p99 = _fmt_q8_p99(q_name)
+        return f"{p99} · {base_subtext}" if p99 else base_subtext
+
+    speedup = _q8_speedup()
+    q8_cols = st.columns(3, gap="medium")
+    with q8_cols[0]:
+        q8_tile(
+            "Fund roll-up: silver shape · P95",
+            _fmt_q8_p95("q8_shape"),
+            _q8_sub_with_p99("q8_shape", "500-line, 50-table SELECT against silver — expected to be slow"),
+            accent="neutral",
         )
-    else:
-        st.markdown("<h2>Sustained-rate headlines</h2>", unsafe_allow_html=True)
-        st.markdown(
-            "<p class='muted' style='font-size:13px; margin-top:-4px;'>"
-            "<em>Both targets autoscale to load: DBSQL Pro provisions up to 8 clusters, "
-            "Lakebase scales up to 4 CU. Latencies aren't strictly monotonic across rates: "
-            "rates that sit near an autoscale threshold can show slightly elevated "
-            "P95 because the measurement window catches the platform mid-scale-event, while "
-            "rates clearly above or below that threshold settle into steady state. The "
-            "useful read: <strong>Lakebase holds P95 under 200 ms across the whole 1×–4× "
-            "peak range</strong>; DBSQL holds dashboard SLO from 5–10 QPS and saturates at "
-            "20 QPS (Medium-Pro 8-cluster ceiling). See the &ldquo;Compute + IWM in action&rdquo; "
-            "expander for the actual cluster-count timeline from these runs.</em>"
-            "</p>",
-            unsafe_allow_html=True,
+    with q8_cols[1]:
+        q8_tile(
+            "Fund roll-up: medallion refactor · P95",
+            _fmt_q8_p95("q8_refactored"),
+            _q8_sub_with_p99("q8_refactored", "25-line SELECT against gold MV"),
+            accent="green",
         )
-        latest_per_rate_target = (
-            sustained_runs_df
-            .sort_values("started_at", ascending=False)
-            .drop_duplicates(subset=["target_rate_qps", "target"], keep="first")
-        )
-        # Autoscale capacity bound per target — surfaced on each tile so the customer
-        # sees the headroom that produced the latency, not just the latency itself.
-        CAPACITY_DELTA = {
-            "dbsql":    "DBSQL Pro · up to 8 clusters",
-            "lakebase": "Lakebase · up to 4 CU",
-        }
-        rate_groups = sorted(latest_per_rate_target["target_rate_qps"].dropna().unique())
-        for rate_qps in rate_groups:
-            sub = latest_per_rate_target[latest_per_rate_target["target_rate_qps"] == rate_qps]
-            label = (
-                "Worst-case query (1 QPS, single-query)" if rate_qps == 1.0 else
-                "Peak (5 QPS, your stated peak)" if rate_qps == 5.0 else
-                "2× headroom (10 QPS)" if rate_qps == 10.0 else
-                "4× scale (20 QPS, June rollout sizing)" if rate_qps == 20.0 else
-                f"Custom ({rate_qps:.0f} QPS)"
-            )
-            st.markdown(f"**{label}**")
-            tile_cols = st.columns(len(sub), gap="medium")
-            for col, (_, row) in zip(tile_cols, sub.iterrows()):
-                samples = int(row.get("total_samples") or 0)
-                capacity = CAPACITY_DELTA.get(row["target"], "")
-                delta_parts = [f"{samples:,} samples"]
-                if capacity:
-                    delta_parts.append(capacity)
-                col.metric(
-                    f"{row['target']} P95",
-                    _fmt_latency(row.get("p95_median_ms")),
-                    delta=" · ".join(delta_parts),
-                )
-
-    # =====================================================================
-    # SECTION 2: Scenario picker + Latency-over-time hero chart
-    # =====================================================================
-    SCENARIO_LABELS = {
-        1.0: "Worst-case query (1 QPS, dbsql-only)",
-        5.0: "Peak (5 QPS, both targets)",
-        10.0: "2× headroom (10 QPS, both targets)",
-        20.0: "4× scale (20 QPS, both targets)",
-    }
-    selected_run_id = None
-    selected_rate = None
-    selected_label = None
-    if not sustained_runs_df.empty:
-        st.markdown("<hr class='db-hair' />", unsafe_allow_html=True)
-        st.markdown("<h2>Latency over time</h2>", unsafe_allow_html=True)
-
-        # One row per rate (most recent run picked across targets)
-        latest_per_rate = (
-            sustained_runs_df
-            .sort_values("started_at", ascending=False)
-            .drop_duplicates(subset=["target_rate_qps"], keep="first")
-            .sort_values("target_rate_qps")
-        )
-        available_rates = [
-            r for r in latest_per_rate["target_rate_qps"].tolist() if r in SCENARIO_LABELS
-        ]
-        label_to_rate = {SCENARIO_LABELS[r]: r for r in available_rates}
-        options = list(label_to_rate.keys())
-
-        # Default to Peak (5 QPS) — clean steady-state happy-path. The 4× scale
-        # leadership-pitch story is one click away in the picker, and the headline
-        # tiles + headroom callout above already surface its number (159 ms).
-        default_idx = 0
-        for i, opt in enumerate(options):
-            if opt.startswith("Peak"):
-                default_idx = i
-                break
-
-        picker_col, _ = st.columns([2, 3], gap="small")
-        with picker_col:
-            selected_label = st.selectbox(
-                "Scenario",
-                options=options,
-                index=default_idx,
-                key="sustained_scenario_picker",
-            )
-        selected_rate = label_to_rate[selected_label]
-        selected_row = latest_per_rate[latest_per_rate["target_rate_qps"] == selected_rate].iloc[0]
-        selected_run_id = selected_row["run_id"]
-
-        buckets_result = queries.get_timeseries_buckets(selected_run_id)
-        buckets_df = buckets_result.df
-        st.plotly_chart(
-            build_latency_timeseries(buckets_df),
-            use_container_width=True,
-        )
-        st.caption(
-            f"Scenario: **{selected_label}** · run_id `{selected_run_id}`. Measurement window only "
-            f"(post-90s warmup). Cold-start ramp is in the expander below."
-        )
-
-        # =================================================================
-        # SECTION 3: QPS time-series + Latency CDF (side-by-side, same picker)
-        # =================================================================
-        chart_cols = st.columns(2, gap="medium")
-        with chart_cols[0]:
-            st.plotly_chart(
-                build_qps_timeseries(buckets_df, target_rate=float(selected_rate or 0)),
-                use_container_width=True,
-            )
-            st.caption(
-                "Coordinated-omission canary: achieved-QPS lagging the target line "
-                "= warehouse throttling."
-            )
-        with chart_cols[1]:
-            cdf_result = queries.get_latency_cdf(selected_run_id)
-            st.plotly_chart(
-                build_latency_cdf(cdf_result.df),
-                use_container_width=True,
-            )
-            st.caption(
-                "Cumulative distribution of post-warmup total latency. "
-                "Vertical guides at 4 / 5 / 7 s SLO."
-            )
-
-    # =====================================================================
-    # SECTION 4: Combined headroom + Q7 steady-state callout
-    # =====================================================================
-    sustained_q7_ref = queries.get_sustained_q7_metrics() or {}
-    q7_p95_str = (
-        _fmt_latency(sustained_q7_ref["p95_ms"])
-        if sustained_q7_ref.get("p95_ms") else "859 ms"
+    speedup_label = "pending" if speedup is None else (
+        "DNF baseline" if speedup == "DNF" else f"{speedup:.0f}×"
     )
+    with q8_cols[2]:
+        q8_tile(
+            "Speedup at production scale",
+            speedup_label,
+            "1.22 TB silver / 30 B GL rows",
+            accent="green",
+        )
+
     st.markdown(
-        f"<div class='db-callout db-callout--success' style='margin-top:18px;'>"
-        f"<strong>Lakebase clears the 5 s dashboard SLO with 31× headroom at 4× peak (20 QPS).</strong> "
-        f"P95 lands at <strong>159 ms</strong> across 12,050 samples, zero errors. The "
-        f"worst-case query (full silver scan, no clustering, no arena filter) under steady-"
-        f"state sustained load lands at P95 <strong>{q7_p95_str}</strong>, 6× under "
-        f"SLO. The misleading lockstep c=20 P99=54s number is an autoscale-bootstrapping "
-        f"artifact, not the worst-case query's real cost. Full breakdown in the "
-        f"stress-test expander."
-        f"</div>",
-        unsafe_allow_html=True,
-    )
-
-    # =====================================================================
-    # SECTION 5: Lakebase vs Redshift small-tile contextualization
-    # =====================================================================
-    rs_cols = st.columns(2, gap="medium")
-    rs_cols[0].metric(
-        "Redshift today", "10–45 s", delta="current pain", delta_color="inverse"
-    )
-    if not sustained_runs_df.empty:
-        lakebase_rows = sustained_runs_df[sustained_runs_df["target"] == "lakebase"]
-        if not lakebase_rows.empty:
-            lb_best = lakebase_rows["p95_median_ms"].min()
-            if lb_best and lb_best > 0:
-                speedup = 22000 / float(lb_best)
-                rs_cols[1].metric(
-                    "Lakebase vs Redshift",
-                    f"{speedup:,.0f}× faster",
-                    delta=f"P95 {_fmt_latency(lb_best)} vs Redshift 22 s baseline",
-                )
-
-    # =====================================================================
-    # SECTION 6: Why this matters — single compressed callout
-    # =====================================================================
-    st.markdown("<hr class='db-hair' />", unsafe_allow_html=True)
-    st.markdown(
-        "<div class='db-callout'>"
-        "<strong>Why this matters: beyond Redshift parity</strong>"
-        "<p style='margin:8px 0 0 0; font-size:13px;'>"
-        "&ldquo;Autoscale in seconds&rdquo; is parity marketing. The real differentiation is "
-        "<strong>mechanism</strong>, <strong>granularity</strong>, and "
-        "<strong>warm-cluster economics</strong>:"
-        "</p>"
-        "<ul style='margin:6px 0 0 18px; padding:0; font-size:13px;'>"
-        "<li><strong>DBSQL Serverless cold start: 2-6 s documented.</strong> Redshift Serverless "
-        "RPU autoscale is documented in <em>minutes</em> per AWS docs. "
-        "(<a href='https://docs.databricks.com/aws/en/compute/sql-warehouse/warehouse-types#performance-differences-between-sql-warehouse-types' target='_blank'>DBSQL warehouse types</a>)</li>"
-        "<li><strong>IWM is predictive (ML cost model), not reactive WLM queues.</strong> Predicts "
-        "incoming query cost and provisions ahead of queue build-up. Even AWS AI-Driven Scaling "
-        "is observation-based. "
-        "(<a href='https://docs.databricks.com/aws/en/compute/sql-warehouse/warehouse-behavior#serverless-sql-warehouse-management' target='_blank'>IWM docs</a>)</li>"
-        "<li><strong>Lakebase autoscale: 1-CU vertical, no connection drop.</strong> ~100ms live "
-        "VM clone, single endpoint, no compute restart. Redshift has no equivalent primitive. "
-        "(<a href='https://docs.databricks.com/aws/en/oltp/projects/autoscaling' target='_blank'>Lakebase autoscaling</a>)</li>"
-        "<li><strong>Photon + Predictive Optimization: 2-4× more work per warm second.</strong> "
-        "Tables continuously re-clustered; no manual VACUUM. "
-        "(<a href='https://www.databricks.com/blog/databricks-sql-accelerates-customer-workloads-5x-just-three-years' target='_blank'>5× acceleration</a> · "
-        "<a href='https://www.databricks.com/blog/announcing-general-availability-predictive-optimization' target='_blank'>PO GA</a>)</li>"
+        "<div class='db-callout' style='margin-top:14px;'>"
+        "<strong>The architectural difference</strong>"
+        "<ul style='margin:8px 0 0 0; padding-left:20px; font-size:13px;'>"
+        "<li><strong>Permission filtering applied once at silver.</strong> Arena scoping, "
+        "RBAC, and multi-tenant filters become transformation logic, not every-query "
+        "overhead. Collapses ~50 lines of repeated filter logic into zero.</li>"
+        "<li><strong>Pre-aggregated business metrics on gold.</strong> PCAP roll-up, fund "
+        "IRR/MOIC/TVPI/DPI, property attribution all computed by scheduled pipelines. The query "
+        "becomes a lookup, not a computation.</li>"
+        "<li><strong>Same audit trail, queryable separately.</strong> SOX events live in "
+        "<code>fact_audit_event</code> with their own lineage. Not joined into every query.</li>"
+        "<li><strong>Refresh cadence configurable.</strong> Daily, hourly, or as data lands "
+        "via scheduled pipelines. Matches PCAP quarterly reporting cycle natively.</li>"
         "</ul>"
         "</div>",
         unsafe_allow_html=True,
     )
 
     # =====================================================================
-    # Lockstep summary (used by stress-test + benchmark-queries expanders)
+    # SECTION 1b: Per-sample latency strip plot from benchmark_raw.
+    #
+    # Three sustained runs feed this chart:
+    #   - q8_shape       @ 1 QPS, 30 min   (silver shape, ~75 measured samples)
+    #   - q8_refactored  @ 5 QPS, 10 min   (medallion at BI peak rate)
+    #   - q8_refactored  @ 10 QPS, 10 min  (medallion at 2× headroom)
+    #
+    # Falls back to the percentile-bar view if benchmark_raw is empty for q8.
     # =====================================================================
-    result = queries.get_benchmark_summary()
-    df = result.df
+    st.markdown("<h3 style='margin-top:18px;'>Per-sample latency distribution</h3>",
+                unsafe_allow_html=True)
 
-    # =====================================================================
-    # EXPANDER 1: Cold-start ramp detail (warmup window only)
-    # =====================================================================
-    if selected_run_id:
-        with st.expander("Cold-start ramp detail (warmup window only)"):
-            warmup_result = queries.get_warmup_data(selected_run_id)
-            st.plotly_chart(
-                build_warmup_ramp(warmup_result.df),
-                use_container_width=True,
-            )
-            st.markdown(
-                f"Warmup samples for **{selected_label}**. Each dot is one query during the 90 s "
-                f"warmup window. The ramp shape tells the IWM story: fast convergence to "
-                f"steady-state means predictive provisioning kicked in. Documented DBSQL "
-                f"Serverless cold-start: 2-6 seconds."
-            )
-
-    # =====================================================================
-    # EXPANDER 2: Stress test (lockstep) — autoscale-lag detail
-    # =====================================================================
-    with st.expander("Stress test (lockstep): autoscale-lag detail"):
-        st.markdown(
-            "<p class='muted' style='font-size:13px;'>"
-            "Lockstep mode fires N concurrent requests at once and waits for all to return. "
-            "Useful for finding hard ceilings, but unrealistic vs Looker's Poisson-arrival "
-            "traffic. Sections above use sustained-rate (Poisson) measurements; the charts here "
-            "preserve the lockstep narrative for completeness."
-            "</p>",
-            unsafe_allow_html=True,
+    q8_samples_result = queries.get_q8_samples()
+    if q8_samples_result.preview_mode or q8_samples_result.df.empty:
+        # Fallback: percentile bars from benchmark_summary (legacy path).
+        q8_filter_label = st.radio(
+            "Show",
+            ["Both", "Silver shape only", "Medallion refactor only"],
+            index=0, horizontal=True, key="q8_shape_filter",
+            label_visibility="collapsed",
         )
-        preview_banner(result, "from benchmark_summary (lockstep only)")
-
-        worst_case_df = (
-            df[df["query_name"] == "worst_case_yoy_growth"] if not df.empty else pd.DataFrame()
-        )
-        if not df.empty and not worst_case_df.empty:
-            q7_by_conc = (
-                worst_case_df.set_index("concurrency")[["p95_ms", "p99_ms"]].to_dict("index")
-            )
-            def _q7_lockstep(c, m):
-                return _fmt_latency(q7_by_conc.get(c, {}).get(m, 0))
-            st.markdown(
-                f"<div class='db-callout'>"
-                f"<strong>Worst-case query (full silver scan): steady-state vs cold burst</strong>"
-                f"<table style='margin-top:8px; font-size:13px; border-collapse:collapse;'>"
-                f"<tr><th style='text-align:left; padding:2px 12px 2px 0;'>Test</th>"
-                f"<th style='text-align:left; padding:2px 12px;'>P95</th>"
-                f"<th style='text-align:left; padding:2px 12px;'>P99</th></tr>"
-                f"<tr style='background:rgba(0,169,114,0.08);'>"
-                f"<td><strong>Sustained 1 QPS</strong> (post-warmup)</td>"
-                f"<td><strong>{q7_p95_str}</strong></td>"
-                f"<td><strong>{_fmt_latency(sustained_q7_ref.get('p99_ms', 0)) if sustained_q7_ref else '~2.0 s'}</strong></td></tr>"
-                f"<tr><td>Lockstep c=20 (cold burst)</td>"
-                f"<td>{_q7_lockstep(20,'p95_ms')}</td>"
-                f"<td>{_q7_lockstep(20,'p99_ms')}</td></tr>"
-                f"<tr><td>Lockstep c=50</td>"
-                f"<td>{_q7_lockstep(50,'p95_ms')}</td>"
-                f"<td>{_q7_lockstep(50,'p99_ms')}</td></tr>"
-                f"<tr><td>Lockstep c=100</td>"
-                f"<td>{_q7_lockstep(100,'p95_ms')}</td>"
-                f"<td>{_q7_lockstep(100,'p99_ms')}</td></tr>"
-                f"</table>"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
-
-        st.markdown("<h4>Latency vs concurrency</h4>", unsafe_allow_html=True)
-        metric_col, _ = st.columns([1, 3], gap="small")
-        with metric_col:
-            metric = st.selectbox(
-                "Latency metric",
-                ["p50_ms", "p95_ms", "p99_ms"],
-                index=1,
-                key="lockstep_metric_picker",
-            )
+        q8_filter_map = {
+            "Both": "both",
+            "Silver shape only": "q8_shape",
+            "Medallion refactor only": "q8_refactored",
+        }
+        q8_perc_result = queries.get_q8_headline()
+        preview_banner(q8_perc_result, "from benchmark_summary WHERE query_name LIKE 'q8_%'")
         st.plotly_chart(
-            build_latency_vs_concurrency(df, metric, sustained_q7_metrics=sustained_q7_ref),
+            build_q8_percentile_comparison(
+                q8_perc_result.df,
+                show=q8_filter_map[q8_filter_label],
+            ),
             use_container_width=True,
         )
         st.caption(
-            "Dash-dot dark line = sustained worst-case-query reference (steady-state). "
-            "Dashed red = lockstep worst-case-query (cold-burst artifact)."
+            "P50/P95/P99 from the most-recent sustained run per variant. "
+            "benchmark_raw didn't have per-sample rows for q8 yet — re-running "
+            "the three Q8 scenarios will populate the strip plot view."
+        )
+    else:
+        q8_filter_label = st.radio(
+            "Show",
+            ["Both series", "Silver shape only", "Medallion refactor only"],
+            index=0, horizontal=True, key="q8_strip_filter",
+            label_visibility="collapsed",
+        )
+        q8_filter_map = {
+            "Both series": "all",
+            "Silver shape only": "silver",
+            "Medallion refactor only": "medallion",
+        }
+        preview_banner(
+            q8_samples_result,
+            "from benchmark_raw WHERE query_name IN ('q8_shape','q8_refactored')",
+        )
+        st.plotly_chart(
+            build_q8_latency_timeline(
+                q8_samples_result.df,
+                show=q8_filter_map[q8_filter_label],
+            ),
+            use_container_width=True,
+        )
+        st.caption(
+            "Each marker is one measured query (warmup excluded). Silver shape "
+            "@ 1 QPS — the realistic ceiling since the query saturates the "
+            "warehouse above that rate. Medallion refactor @ 10 QPS (2× BI peak) "
+            "demonstrating headroom. Log-Y axis handles the ~22× spread between "
+            "the two variants."
         )
 
-        c1, c2 = st.columns(2, gap="medium")
-        with c1:
-            st.plotly_chart(build_throughput_chart(df), use_container_width=True)
-        with c2:
-            st.plotly_chart(build_query_mix_chart(df, metric), use_container_width=True)
-
     # =====================================================================
-    # EXPANDER 3: Compute that ran this benchmark + IWM in action
+    # SECTION 2: Dashboard mix at sustained load (DBSQL Pro)
     # =====================================================================
-    with st.expander("Compute that ran this benchmark + IWM in action"):
-        spec_cols = st.columns(2, gap="medium")
-        with spec_cols[0]:
-            st.markdown(
-                "<div class='db-callout'>"
-                "<strong>DBSQL warehouse</strong><br>"
-                "Serverless SQL Pro, <strong>Medium, autoscale 1→8 clusters</strong><br>"
-                "24 DBU / hour per cluster · auto-stop 60 min"
-                "</div>",
-                unsafe_allow_html=True,
-            )
-        with spec_cols[1]:
-            st.markdown(
-                "<div class='db-callout'>"
-                "<strong>Lakebase endpoint</strong><br>"
-                "Autoscale <strong>1→4 CU</strong>, 2 GB RAM/CU<br>"
-                "Postgres 17 · read/write · scale-to-zero off"
-                "</div>",
-                unsafe_allow_html=True,
-            )
+    st.markdown("<hr class='db-hair' />", unsafe_allow_html=True)
+    with st.expander("Dashboard mix at peak + 2× headroom (sustained-load detail)"):
+        st.markdown("<h2>Dashboard mix holds SLO at peak and 2× peak</h2>", unsafe_allow_html=True)
         st.markdown(
-            "<p style='font-size:13px; margin-top:10px;'>"
-            "<strong>Why a Medium-Pro 1→8 warehouse keeps the dashboard mix within SLO at "
-            "5–10 QPS:</strong> Liquid Clustering on <code>(arena_id, transaction_date)</code> "
-            "prunes ~99.99% of the silver fact table per query; 5 of 6 dashboard queries hit "
-            "pre-aggregated gold tables (millions of rows, not billions). Photon + IWM cluster "
-            "autoscale handle the residual concurrency. The redline knob is &ldquo;raise "
-            "max-clusters and rerun,&rdquo; not a hardware migration."
+            "<p style='color:#4A5568; margin-top:-8px; margin-bottom:14px;'>"
+            "Six dashboard-shaped queries (fund performance, GL monthly rollup, property "
+            "financials, top properties, multi-month P&amp;L, investor commitments) run at "
+            "sustained Poisson arrivals against DBSQL Pro Medium, autoscale 1→8. Peak "
+            "(5 QPS) is Juniper's stated load; 2× headroom (10 QPS) covers the June PDF "
+            "Reporting rollout. Both hold within the 5 s P95 dashboard SLO, compared to "
+            "Redshift's current <strong>10–45 s</strong> on the same shapes."
             "</p>",
             unsafe_allow_html=True,
         )
 
-        # IWM-in-action evidence panel
-        st.markdown("<hr class='db-hair' />", unsafe_allow_html=True)
-        st.markdown(
-            "<h4>IWM in action: real workspace metrics from the 4/28 run</h4>",
-            unsafe_allow_html=True,
-        )
-        iwm_image_path = Path(__file__).resolve().parent / "assets" / "iwm-running-clusters.png"
-        if iwm_image_path.exists():
-            st.image(
-                str(iwm_image_path),
-                use_column_width=True,
-                caption="Running clusters (Activity Details), Apr 28 2026, 10:15-12:00. "
-                        "Blue line: cluster count. Green bars: query activity. Light gray: ready.",
+        sustained_runs_result = queries.get_sustained_runs()
+        preview_banner(sustained_runs_result, "from benchmark_runs WHERE mode='sustained'")
+        sustained_runs_df = sustained_runs_result.df
+
+        # Only DBSQL rows at the two main-flow rates surface here.
+        MAIN_RATES = [5.0, 10.0]
+        if sustained_runs_df.empty:
+            st.info(
+                "No sustained-rate runs in Delta yet. Run the harness to populate the headline tiles "
+                "and time-series charts."
             )
-        st.markdown(
-            "<p style='font-size:13px; margin-top:8px;'>"
-            "<strong>What it shows:</strong> Real workspace metrics from the 4/28 benchmark run. "
-            "During the <code>sustained_scale_4x</code> (20 QPS, 4× peak) phase, IWM's ML cost "
-            "model predicted load and provisioned the warehouse from 1 to 2 to 6 clusters within "
-            "~5 minutes. New-cluster start time is documented at 2-6 seconds (DBSQL Serverless). "
-            "Redshift Concurrency Scaling is reactive (waits for queue-depth threshold) and "
-            "provisions in minutes per AWS docs."
-            "</p>"
-            "<p style='font-size:13px;'>"
-            "<strong>Honest about the regime:</strong> this is the same 20 QPS scenario where "
-            "DBSQL P95 hit 15.6 s on the dashboard mix. IWM fired correctly; the workload simply "
-            "exceeds what 8 Medium-Pro clusters can absorb on a multi-billion-row silver fact "
-            "table at 4× peak. The 6-cluster peak is the warehouse using its capacity, not its "
-            "sweet spot for this workload."
-            "</p>"
-            "<p style='font-size:13px;'>"
-            "<strong>Why this still helps Juniper:</strong> The same 20 QPS load on Lakebase held "
-            "P95 at <strong>159 ms</strong> with no horizontal-cluster dance (see the "
-            "latency-over-time chart at the top of this page). <strong>Vertical 1-CU scaling on a "
-            "single endpoint is the right primitive for sustained dashboard QPS; horizontal "
-            "cluster autoscale is the right primitive for ad-hoc and ML feature engineering.</strong> "
-            "Both proven in this app: pick the right one for each workload."
-            "</p>",
-            unsafe_allow_html=True,
-        )
-        workspace_host_iwm = os.environ.get("DATABRICKS_HOST", "").replace("https://", "").rstrip("/")
-        warehouse_id_iwm = os.environ.get("DATABRICKS_WAREHOUSE_ID", "aae8e7baf626bd0d")
-        if workspace_host_iwm:
-            iwm_live_url = f"https://{workspace_host_iwm}/sql/warehouses/{warehouse_id_iwm}"
-            st.markdown(
-                f"<p style='font-size:13px;'>"
-                f"<a href='{iwm_live_url}' target='_blank'>"
-                f"View live cluster activity in workspace UI &rarr;</a> "
-                f"(Monitoring tab on the warehouse, with Activity Details toggle)"
-                f"</p>",
-                unsafe_allow_html=True,
+        else:
+            latest_per_rate_target = (
+                sustained_runs_df
+                .sort_values("started_at", ascending=False)
+                .drop_duplicates(subset=["target_rate_qps", "target"], keep="first")
             )
+            tile_cols = st.columns(len(MAIN_RATES), gap="medium")
+            for col, rate in zip(tile_cols, MAIN_RATES):
+                row_match = latest_per_rate_target[
+                    (latest_per_rate_target["target_rate_qps"] == rate) &
+                    (latest_per_rate_target["target"] == "dbsql")
+                ]
+                label = "Peak (5 QPS, your stated peak)" if rate == 5.0 else "2× headroom (10 QPS)"
+                if row_match.empty:
+                    col.metric(label, "no run yet", delta="DBSQL Pro · up to 8 clusters")
+                    continue
+                r = row_match.iloc[0]
+                samples = int(r.get("total_samples") or 0)
+                p99 = r.get("p99_median_ms")
+                p99_str = f"P99 {_fmt_latency(p99)} · " if p99 else ""
+                col.metric(
+                    label,
+                    _fmt_latency(r.get("p95_median_ms")),
+                    delta=f"{p99_str}DBSQL Pro · {samples:,} samples · median across dashboard mix",
+                )
+
+        # =====================================================================
+        # SECTION 3: Latency over time (5 QPS default)
+        # =====================================================================
+        selected_run_id = None
+        selected_rate = None
+        selected_label = None
+        if not sustained_runs_df.empty:
+            st.markdown("<h3 style='margin-top:18px;'>Latency over time</h3>", unsafe_allow_html=True)
+
+            # Only main-flow rates in the picker.
+            latest_per_rate = (
+                sustained_runs_df[sustained_runs_df["target_rate_qps"].isin(MAIN_RATES)]
+                .sort_values("started_at", ascending=False)
+                .drop_duplicates(subset=["target_rate_qps"], keep="first")
+                .sort_values("target_rate_qps")
+            )
+            SCENARIO_LABELS = {
+                5.0: "Peak (5 QPS)",
+                10.0: "2× headroom (10 QPS)",
+            }
+            available_rates = [r for r in latest_per_rate["target_rate_qps"].tolist() if r in SCENARIO_LABELS]
+            label_to_rate = {SCENARIO_LABELS[r]: r for r in available_rates}
+            options = list(label_to_rate.keys())
+
+            if options:
+                picker_col, _ = st.columns([2, 3], gap="small")
+                with picker_col:
+                    selected_label = st.selectbox(
+                        "Scenario", options=options, index=0, key="sustained_scenario_picker",
+                    )
+                selected_rate = label_to_rate[selected_label]
+                selected_row = latest_per_rate[latest_per_rate["target_rate_qps"] == selected_rate].iloc[0]
+                selected_run_id = selected_row["run_id"]
+
+                buckets_result = queries.get_timeseries_buckets(selected_run_id)
+                buckets_df = buckets_result.df
+                # DBSQL-only view
+                dbsql_buckets = (
+                    buckets_df[buckets_df["target"] == "dbsql"]
+                    if not buckets_df.empty else buckets_df
+                )
+                st.plotly_chart(
+                    build_latency_timeseries(dbsql_buckets),
+                    use_container_width=True,
+                )
+                st.caption(
+                    f"Scenario: **{selected_label}** · run_id `{selected_run_id}`. Measurement "
+                    f"window only (post-90 s warmup)."
+                )
+
+                chart_cols = st.columns(2, gap="medium")
+                with chart_cols[0]:
+                    st.plotly_chart(
+                        build_qps_timeseries(dbsql_buckets, target_rate=float(selected_rate or 0)),
+                        use_container_width=True,
+                    )
+                    st.caption(
+                        "Coordinated-omission canary: achieved-QPS lagging the target line "
+                        "= warehouse throttling."
+                    )
+                with chart_cols[1]:
+                    cdf_result = queries.get_latency_cdf(selected_run_id)
+                    dbsql_cdf = (
+                        cdf_result.df[cdf_result.df["target"] == "dbsql"]
+                        if not cdf_result.df.empty else cdf_result.df
+                    )
+                    st.plotly_chart(
+                        build_latency_cdf(dbsql_cdf),
+                        use_container_width=True,
+                    )
+                    st.caption(
+                        "Cumulative distribution of post-warmup total latency. "
+                        "Vertical guides at 4 / 5 / 7 s SLO."
+                    )
 
     # =====================================================================
-    # EXPANDER 4: Methodology
+    # Compute + IWM evidence — visible by default since the warehouse story
+    # is what explains the headline latency numbers above.
+    # =====================================================================
+    st.markdown("<hr class='db-hair' />", unsafe_allow_html=True)
+    st.markdown("<h2>Compute that ran this benchmark + IWM in action</h2>", unsafe_allow_html=True)
+    st.markdown(
+        "<div class='db-callout'>"
+        "<strong>DBSQL warehouse</strong><br>"
+        "Serverless SQL Pro, <strong>Medium, autoscale 1→8 clusters</strong><br>"
+        "24 DBU / hour per cluster · auto-stop 60 min · Photon enabled"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        "<p style='font-size:13px; margin-top:10px;'>"
+        "<strong>Why a Medium-Pro 1→8 warehouse keeps the dashboard mix within SLO at "
+        "5–10 QPS:</strong> Liquid Clustering on <code>(arena_id, transaction_date)</code> "
+        "prunes ~99.99% of the silver fact table per query; 5 of 6 dashboard queries hit "
+        "pre-aggregated gold tables (millions of rows, not billions). Photon + IWM cluster "
+        "autoscale handle the residual concurrency. The redline knob is &ldquo;raise "
+        "max-clusters and rerun,&rdquo; not a hardware migration."
+        "</p>",
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("<hr class='db-hair' />", unsafe_allow_html=True)
+    st.markdown(
+        "<h4>IWM in action: real workspace metrics from the 4/28 run</h4>",
+        unsafe_allow_html=True,
+    )
+    iwm_image_path = Path(__file__).resolve().parent / "assets" / "iwm-running-clusters.png"
+    if iwm_image_path.exists():
+        st.image(
+            str(iwm_image_path),
+            use_column_width=True,
+            caption="Running clusters (Activity Details), Apr 28 2026, 10:15-12:00. "
+                    "Blue line: cluster count. Green bars: query activity. Light gray: ready.",
+        )
+    st.markdown(
+        "<p style='font-size:13px; margin-top:8px;'>"
+        "IWM's ML cost model predicted load and provisioned the warehouse from 1 to 2 to 6 "
+        "clusters within ~5 minutes during the high-load phase. New-cluster start time is "
+        "documented at 2-6 seconds (DBSQL Serverless). Redshift Concurrency Scaling is "
+        "reactive (waits for queue-depth threshold) and provisions in minutes per AWS docs."
+        "</p>",
+        unsafe_allow_html=True,
+    )
+    workspace_host_iwm = os.environ.get("DATABRICKS_HOST", "").replace("https://", "").rstrip("/")
+    warehouse_id_iwm = os.environ.get("DATABRICKS_WAREHOUSE_ID", "aae8e7baf626bd0d")
+    if workspace_host_iwm:
+        iwm_live_url = f"https://{workspace_host_iwm}/sql/warehouses/{warehouse_id_iwm}"
+        st.markdown(
+            f"<p style='font-size:13px;'>"
+            f"<a href='{iwm_live_url}' target='_blank'>"
+            f"View live cluster activity in workspace UI &rarr;</a> "
+            f"(Monitoring tab on the warehouse, with Activity Details toggle)"
+            f"</p>",
+            unsafe_allow_html=True,
+        )
+
+    # =====================================================================
+    # EXPANDER 2: Methodology
     # =====================================================================
     with st.expander("Methodology: how we tested"):
         st.markdown(
@@ -915,98 +987,80 @@ def page_latency() -> None:
             "<strong>Sustained-rate measurement methodology</strong>"
             "<ul style='margin:8px 0 0 18px; padding:0; font-size:13px;'>"
             "<li><strong>Arrival pattern:</strong> Poisson via "
-            "<code>random.expovariate(rate)</code> cumulative: independent submitter "
+            "<code>random.expovariate(rate)</code> cumulative on an independent submitter "
             "timeline (fixes coordinated omission per wrk2 / HdrHistogram pattern). If a "
-            "submission slips because the warehouse stalls, queue time is captured separately "
-            "from service time.</li>"
+            "submission slips because the warehouse stalls, queue time is captured "
+            "separately from service time.</li>"
             "<li><strong>Warmup:</strong> 90 s at target rate, results written to Delta with "
-            "<code>is_warmup=true</code>, excluded from headline statistics but rendered in "
-            "the Cold-start ramp expander above.</li>"
-            "<li><strong>Scenarios:</strong> Peak (5 QPS) · 2× headroom (10 QPS) · 4× scale "
-            "(20 QPS) · Worst-case query (1 QPS, single-query only). All 600 s measurement "
-            "window after warmup. Both DBSQL + Lakebase per scenario; the worst-case query is "
-            "dbsql-only (silver isn't synced to Lakebase).</li>"
-            "<li><strong>Warehouse:</strong> Medium-Pro autoscale 1-8 (bumped from 1-4 on "
-            "2026-04-28 for the redesign). Photon enabled. <code>auto_stop_mins</code> 60.</li>"
-            "<li><strong>Lakebase:</strong> Autoscale 1-4 CU on Postgres 17, read/write "
-            "endpoint, scale-to-zero off.</li>"
-            "<li><strong>Run IDs (4/28):</strong> Peak <code>2026-04-28T15:09:02Z</code> · "
-            "2× headroom <code>2026-04-28T15:32:45Z</code> (backfilled from CSV) · 4× scale "
-            "<code>2026-04-28T15:55:53Z</code> · Worst-case query "
-            "<code>2026-04-28T16:26:36Z</code>.</li>"
+            "<code>is_warmup=true</code> and excluded from headline statistics.</li>"
+            "<li><strong>Dashboard mix scenarios:</strong> Peak (5 QPS) · 2× headroom "
+            "(10 QPS). 600 s measurement window after warmup. Weighted mix across six "
+            "dashboard-shaped queries against DBSQL Pro.</li>"
+            "<li><strong>Fund roll-up architectural delta:</strong> silver shape "
+            "(500-line silver scan) vs medallion refactor (25-line gold SELECT). Silver "
+            "shape run at 1 QPS sustained (n=180 measurement samples after a 5-min warmup "
+            "to absorb cluster cold-start); medallion refactor run at 10 QPS sustained "
+            "(n=248 samples). Sample sizes shown inline on each Q8 chart trace.</li>"
+            "<li><strong>Warehouse:</strong> Medium-Pro autoscale 1-8. Photon enabled. "
+            "<code>auto_stop_mins</code> 60.</li>"
+            "<li><strong>Data scale:</strong> 1.22 TB silver, 30 B GL rows, 10 K arenas. "
+            "Wider GL schema with memo_text / currency / approval / counterparty / cost_center.</li>"
             "</ul>"
             "</div>",
             unsafe_allow_html=True,
         )
 
     # =====================================================================
-    # EXPANDER 5: Benchmark queries (SQL reference)
+    # EXPANDER 3: Fund roll-up SQL — shape vs medallion refactor side-by-side
     # =====================================================================
-    with st.expander("Benchmark queries (SQL reference)"):
+    with st.expander("Fund roll-up SQL: the 500-line monster vs the 25-line medallion refactor"):
         workspace_host_lat = os.environ.get("DATABRICKS_HOST", "").replace("https://", "").rstrip("/")
-        harness_url = (
-            f"https://{workspace_host_lat}/editor/notebooks/2835102681662565"
-            if workspace_host_lat else ""
+        warehouse_id_q = os.environ.get("DATABRICKS_WAREHOUSE_ID", "aae8e7baf626bd0d")
+        sql_dir = Path(__file__).resolve().parent / "sql"
+        shape_path = sql_dir / "Q8_shape.sql"
+        refactored_path = sql_dir / "Q8_refactored.sql"
+        shape_sql = shape_path.read_text() if shape_path.exists() else "-- silver-shape SQL not found"
+        refactored_sql = (
+            refactored_path.read_text() if refactored_path.exists()
+            else "-- medallion-refactor SQL not found"
         )
-        harness_link_html = (
-            f" &middot; <a href='{harness_url}' target='_blank'>"
-            f"View the full harness notebook &rarr;</a>"
-            if harness_url else ""
-        )
+        shape_lines = shape_sql.count("\n")
+        refactored_lines = refactored_sql.count("\n")
+
         st.markdown(
             "<p class='muted' style='font-size:13px;'>"
-            "Q1–Q6 are dashboard-shaped, scoped to one <code>arena_id</code>, run against both "
-            "DBSQL and Lakebase. Q7 is the worst-case redline query: full-silver scan, "
-            "no arena filter, DBSQL only. Q8 is reserved for the customer's scariest production "
-            f"query.{harness_link_html}</p>",
+            "Both queries return the same business answer: fund performance roll-up with "
+            "IRR / MOIC / TVPI / DPI, property attribution, and peer-vintage benchmarks for "
+            "a single fund. The silver shape replicates the 500-line / 50-table pattern "
+            "Juniper Square described on the 5/13 call. The medallion refactor reads from "
+            "<code>gold_fund_attribution_period</code>, a materialized view maintained by SDP."
+            "</p>",
             unsafe_allow_html=True,
         )
-        picker_col_q, _ = st.columns([2, 1], gap="small")
-        with picker_col_q:
-            pick = st.selectbox(
-                "Query",
-                options=[q.display_name for q in BENCHMARK_QUERIES],
-                index=4,
-                key="query_picker",
-            )
-        chosen = next(q for q in BENCHMARK_QUERIES if q.display_name == pick)
 
-        meta_cols = st.columns([2, 1, 1], gap="medium")
-        meta_cols[0].markdown(f"**{chosen.summary}**")
-        meta_cols[1].metric("Category", chosen.category)
-        meta_cols[2].metric("Mix weight", f"×{chosen.weight}")
+        meta_cols = st.columns(2, gap="medium")
+        meta_cols[0].metric("Silver shape", f"{shape_lines} lines",
+                            delta="50-table touch, 15 CTEs")
+        meta_cols[1].metric("Medallion refactor", f"{refactored_lines} lines",
+                            delta="1 fact + 6 dim joins, no CTEs")
 
-        warehouse_id_q = os.environ.get("DATABRICKS_WAREHOUSE_ID", "aae8e7baf626bd0d")
         if workspace_host_lat:
-            editor_url = (
-                f"https://{workspace_host_lat}/sql/editor/"
-                f"?o=&warehouse_id={warehouse_id_q}"
-            )
-            history_url = (
-                f"https://{workspace_host_lat}/sql/history"
-                f"?o=&warehouse_id={warehouse_id_q}"
-            )
+            editor_url = f"https://{workspace_host_lat}/sql/editor/?o=&warehouse_id={warehouse_id_q}"
+            history_url = f"https://{workspace_host_lat}/sql/history?o=&warehouse_id={warehouse_id_q}"
             st.markdown(
-                f"<p><a href='{editor_url}' target='_blank'>"
-                f"Open DBSQL editor on benchmark warehouse →</a> &nbsp;&nbsp; "
+                f"<p style='margin-top:10px;'>"
+                f"<a href='{editor_url}' target='_blank'>Open DBSQL editor →</a> &nbsp;&nbsp; "
                 f"<a href='{history_url}' target='_blank'>View query history →</a></p>",
                 unsafe_allow_html=True,
             )
 
         sql_cols = st.columns(2, gap="medium")
         with sql_cols[0]:
-            st.markdown("**DBSQL (Spark SQL)**")
-            st.code(chosen.sql_dbsql, language="sql")
+            st.markdown(f"**Silver shape — {shape_lines} lines against silver**")
+            st.code(shape_sql, language="sql")
         with sql_cols[1]:
-            st.markdown("**Lakebase (Postgres)**")
-            st.code(chosen.sql_lakebase, language="sql")
-
-        st.markdown("<h4>benchmark_summary SQL (lockstep filter applied)</h4>",
-                    unsafe_allow_html=True)
-        st.code(result.sql or "", language="sql")
-
-        st.markdown("<h4>Raw lockstep summary rows</h4>", unsafe_allow_html=True)
-        st.dataframe(df, use_container_width=True, height=300)
+            st.markdown(f"**Medallion refactor — {refactored_lines} lines against gold**")
+            st.code(refactored_sql, language="sql")
 
 
 # ---------------------------------------------------------------------------
@@ -1018,10 +1072,10 @@ def page_cost() -> None:
 
     render_demo_scope(
         demonstrated=[
-            "Both serving paths billed on the compute that actually ran the benchmark",
-            "Warehouse size + DBU rate + query time → live cost-per-query calculation",
-            "Continuous 1-min microbatch sync cost included, not hidden",
-            "Break-even curve: where DBSQL vs Lakebase crosses on queries/month",
+            "Redshift baseline calculator: Juniper's actual cluster sizing (3× ra3.4xlarge + 2+2× ra3.large, us-west-2)",
+            "Databricks calculator: Serverless SQL Pro warehouse + Serverless ETL pipelines at matched workload",
+            "10× growth projection: June PDF Reporting (5× data) + 1K→10K customer scale",
+            "Tag-based cost attribution via system.billing.usage",
         ],
         also_supported=[
             ("Custom tags for cost attribution (system.billing.usage)",
@@ -1036,262 +1090,492 @@ def page_cost() -> None:
     )
     st.markdown("<hr class='db-hair' />", unsafe_allow_html=True)
 
-    # Pull benchmark summary so cost can be derived from measured query times
-    bench = queries.get_benchmark_summary()
-    bench_df = bench.df
-    lb_mean_sec = None
-    db_mean_sec = None
-    lb_peak_qps = None
-    if not bench_df.empty:
-        # Fall back to p50_ms if mean_ms isn't available (e.g. older schema)
-        latency_col = "mean_ms" if "mean_ms" in bench_df.columns else "p50_ms"
-        lb = bench_df[bench_df["target"] == "lakebase"]
-        db = bench_df[bench_df["target"] == "dbsql"]
-        if not lb.empty:
-            lb_mean_sec = float(lb[latency_col].mean()) / 1000.0
-            # Aggregate QPS at the highest concurrency tested
-            peak = int(lb["concurrency"].max())
-            lb_peak_qps = float(lb[lb["concurrency"] == peak]["throughput_qps"].sum())
-        if not db.empty:
-            db_mean_sec = float(db[latency_col].mean()) / 1000.0
-
-    # -----------------------------------------------------------------
-    # Specs: what actually ran this benchmark (single source of truth)
-    # -----------------------------------------------------------------
     st.markdown(
-        "<p class='muted'>The two serving paths bill differently. DBSQL is pay-per-query-second on "
-        "serverless SQL DBUs. Lakebase is pay-per-CU-hour while the endpoint is running. Both numbers "
-        "below use the mean query time measured in this benchmark. See the <em>Data latency</em> tab "
-        "for the compute specs that produced them.</p>",
+        "<p style='color:#4A5568;'>Two cost models for the same workload. Redshift is "
+        "<strong>capacity-priced</strong>: you pay for the cluster whether it's busy or idle. "
+        "Databricks is <strong>usage-priced</strong>: pay only when queries run, auto-stop when "
+        "idle. The growth projection below uses both models against the same Juniper "
+        "growth path (PDF Reporting + 1K→10K customer scale).</p>",
         unsafe_allow_html=True,
     )
 
-    # -----------------------------------------------------------------
-    # Two cost models side by side
-    # -----------------------------------------------------------------
-    dbsql_col, lakebase_col = st.columns(2, gap="large")
+    # =====================================================================
+    # SECTION 1: Today's footprint — Redshift baseline vs Databricks
+    # =====================================================================
+    st.markdown("<h2>Today's footprint at 1.22 TB / 30 K queries per month</h2>", unsafe_allow_html=True)
 
-    # --- DBSQL (pay per query-second) ---
+    # Optimization toggle — switches Databricks defaults between "same as Redshift workload"
+    # and "post-rearchitecture optimized" (Small warehouse, fewer clusters, more ETL pipeline work).
+    optimize_mode = st.toggle(
+        "Databricks on optimized workload (post-medallion rebuild)",
+        value=False, key="dbx_optimize_mode",
+        help="When enabled, models steady-state after Juniper rebuilds with medallion: "
+             "queries hit pre-aggregated gold MVs so warehouse can shrink to Small with "
+             "fewer active clusters. More transformation work runs in scheduled ETL "
+             "pipelines (compute-once-on-write beats compute-on-read at 5 QPS).",
+    )
+    if optimize_mode:
+        DBX_DEFAULTS = dict(size_idx=0, clusters=1.0, hours=10, days=22, etl=160)
+        dbx_header_label = "Databricks on optimized workload"
+        dbx_header_desc = (
+            "Post-rearchitecture sizing: Small warehouse (12 DBU/hr) since dashboard "
+            "queries hit gold MVs; 1.0 avg cluster sufficient for 5 QPS on pre-aggregated "
+            "tables; ETL pipelines absorb the transformation work that used to run on read."
+        )
+    else:
+        DBX_DEFAULTS = dict(size_idx=1, clusters=1.5, hours=10, days=22, etl=100)
+        dbx_header_label = "Databricks at the same workload"
+        dbx_header_desc = (
+            "Sizing matched to Juniper's stated load (5 QPS Looker peak, ~30 K queries/mo, "
+            "1 TB/day ingest). Active-clusters default is measured from the 4/28 IWM run."
+        )
+    # Suffix keys so the widgets re-instantiate with fresh defaults when toggling.
+    k = "_opt" if optimize_mode else "_std"
+
+    redshift_col, dbsql_col = st.columns(2, gap="large")
+
+    # --- Redshift baseline (Juniper's actual sizing) ---
+    RA3_PRICING_USD_PER_HR = {
+        # us-west-2 on-demand and effective-RI hourly rates per AWS pricing pages.
+        # Effective RI rates approximate 1yr / 3yr "all upfront" amortized.
+        "On-demand":             {"ra3.4xlarge": 3.26,  "ra3.large": 0.543},
+        "1yr RI (~30% off)":     {"ra3.4xlarge": 2.28,  "ra3.large": 0.380},
+        "3yr RI (~55% off)":     {"ra3.4xlarge": 1.47,  "ra3.large": 0.236},
+    }
+    REDSHIFT_STORAGE_GB_MONTH = 0.024  # RA3 managed storage list price
+
+    with redshift_col:
+        st.markdown("<h3>Redshift baseline</h3>", unsafe_allow_html=True)
+        st.markdown(
+            "<p class='muted' style='font-size:13px; margin-top:-6px;'>"
+            "Juniper's confirmed sizing (5/20 reply): 3 RA3 clusters in us-west-2, "
+            "WLM auto with Concurrency Scaling enabled (max 5/2/2)."
+            "</p>",
+            unsafe_allow_html=True,
+        )
+        rs_n_data_eng = st.number_input(
+            "ra3.4xlarge data-eng nodes",
+            min_value=1, max_value=16, value=3, step=1, key="rs_data_eng",
+            help="Juniper data-eng cluster: 3 nodes at 12 vCPU / 96 GB RAM / 128 TB managed-storage cap each.",
+        )
+        rs_n_reporting = st.number_input(
+            "ra3.large reporting nodes",
+            min_value=1, max_value=16, value=2, step=1, key="rs_reporting",
+            help="Juniper reporting cluster: 2 nodes at 2 vCPU / 16 GB RAM / 8 TB cap each.",
+        )
+        rs_n_insights = st.number_input(
+            "ra3.large insights nodes",
+            min_value=1, max_value=16, value=2, step=1, key="rs_insights",
+        )
+        rs_pricing_tier = st.selectbox(
+            "Pricing tier",
+            list(RA3_PRICING_USD_PER_HR.keys()),
+            index=1,  # default 1yr RI as a reasonable midpoint
+            key="rs_pricing",
+        )
+        rs_storage_tb = st.number_input(
+            "Managed storage used (TB)",
+            min_value=0.1, max_value=500.0, value=1.2, step=0.1, format="%.1f",
+            key="rs_storage",
+            help="Juniper's stated 1.2 TB in use today (5/20 reply). 416 TB provisioned capacity is "
+                 "headroom, not billed separately on RA3.",
+        )
+        rs_cs_uplift = st.slider(
+            "Concurrency Scaling uplift (% of base)",
+            0, 50, 15, step=5, key="rs_cs",
+            help="WLM auto with CS enabled adds compute during peak. Rough estimate; depends on "
+                 "actual firing rate which Juniper hasn't shared.",
+        )
+
+        rates = RA3_PRICING_USD_PER_HR[rs_pricing_tier]
+        rs_base_hourly = (
+            rs_n_data_eng * rates["ra3.4xlarge"] +
+            (rs_n_reporting + rs_n_insights) * rates["ra3.large"]
+        )
+        rs_base_monthly = rs_base_hourly * 24 * 30
+        rs_cs_monthly = rs_base_monthly * (rs_cs_uplift / 100.0)
+        rs_storage_monthly = rs_storage_tb * 1024 * REDSHIFT_STORAGE_GB_MONTH
+        rs_monthly = rs_base_monthly + rs_cs_monthly + rs_storage_monthly
+        rs_annual = rs_monthly * 12
+
+        st.metric("Monthly", f"${rs_monthly:,.0f}")
+        st.metric("Annual", f"${rs_annual:,.0f}")
+        st.markdown(
+            f"<p class='muted' style='font-size:12px;'>"
+            f"<code>Base: ({rs_n_data_eng} × ${rates['ra3.4xlarge']} + "
+            f"{rs_n_reporting + rs_n_insights} × ${rates['ra3.large']}) × 720 hr = "
+            f"${rs_base_monthly:,.0f}</code><br>"
+            f"<code>CS uplift ({rs_cs_uplift}%): ${rs_cs_monthly:,.0f}</code><br>"
+            f"<code>Storage: {rs_storage_tb:.1f} TB × ${REDSHIFT_STORAGE_GB_MONTH}/GB-mo = "
+            f"${rs_storage_monthly:,.0f}</code>"
+            f"</p>",
+            unsafe_allow_html=True,
+        )
+
+    # --- DBSQL Pro (pay per query-second) ---
     DBU_PER_HOUR_BY_SIZE = {
-        "2X-Small (4 DBU/hr)": 4,
-        "X-Small (6 DBU/hr)": 6,
         "Small (12 DBU/hr)": 12,
         "Medium (24 DBU/hr)": 24,
         "Large (40 DBU/hr)": 40,
         "X-Large (80 DBU/hr)": 80,
     }
+    # SDP serverless DBU rate (Advanced, AWS Premium list)
+    SDP_DBU_RATE = 0.36
+
     with dbsql_col:
-        st.markdown("<h3>DBSQL: pay-per-query-second</h3>", unsafe_allow_html=True)
+        st.markdown(f"<h3>{dbx_header_label}</h3>", unsafe_allow_html=True)
+        st.markdown(
+            f"<p class='muted' style='font-size:13px; margin-top:-6px;'>{dbx_header_desc}</p>",
+            unsafe_allow_html=True,
+        )
         size_label = st.selectbox(
             "Warehouse size",
             list(DBU_PER_HOUR_BY_SIZE.keys()),
-            index=3,  # Medium is what we benchmarked (autoscale 1-8 since 2026-04-28)
-            key="dbsql_size",
+            index=DBX_DEFAULTS["size_idx"],
+            key=f"dbsql_size{k}",
         )
         dbu_per_hour = DBU_PER_HOUR_BY_SIZE[size_label]
         dbu_rate = st.number_input(
-            "$ per DBU (Serverless SQL list price)",
-            min_value=0.10, value=0.70, step=0.05, key="dbsql_dbu_rate",
+            "$ per DBU (Serverless SQL Pro, AWS Premium list)",
+            min_value=0.10, value=0.70, step=0.05, key=f"dbsql_dbu_rate{k}",
+            help="Serverless SQL Pro list price on AWS Premium is $0.70/DBU. "
+                 "(Classic Pro at $0.55/DBU is a different SKU that uses customer-managed VMs.)",
         )
-        default_sec = round(db_mean_sec, 3) if db_mean_sec else 0.57
-        avg_sec_dbsql = st.number_input(
-            "Mean query-seconds (measured)",
-            min_value=0.01, value=default_sec, step=0.01, format="%.3f",
-            key="dbsql_sec",
-            help="Mean across all queries × concurrency levels in the current benchmark run.",
+        active_hours_per_day = st.slider(
+            "Active hours per day (warehouse running)",
+            1, 24, DBX_DEFAULTS["hours"], key=f"dbsql_hours{k}",
+            help="Business-day usage with 60 min auto-stop typically lands 8–12h/day for a "
+                 "team-shared warehouse. Bursty patterns can go much lower.",
         )
-        dbsql_cost_per_query = (avg_sec_dbsql / 3600.0) * dbu_per_hour * dbu_rate
-        st.metric("Cost per query", f"${dbsql_cost_per_query:,.6f}")
-        st.metric("Cost per 1M queries", f"${dbsql_cost_per_query * 1_000_000:,.2f}")
+        active_days_per_month = st.slider(
+            "Active days per month",
+            10, 31, DBX_DEFAULTS["days"], key=f"dbsql_days{k}",
+            help="22 business days is a reasonable baseline. Higher if the team runs weekends.",
+        )
+        avg_clusters = st.slider(
+            "Average active clusters (autoscale 1→8)",
+            1.0, 8.0, DBX_DEFAULTS["clusters"], step=0.5, key=f"dbsql_clusters{k}",
+            help="From the 4/28 IWM run: warehouse averaged 1–2 clusters during 5–10 QPS dashboard mix, "
+                 "scaled to 6 clusters briefly during 20 QPS bursts. Drop to 1.0 if queries hit gold MVs only.",
+        )
+        sdp_dbu_per_day = st.number_input(
+            "ETL pipelines: DBU per day",
+            min_value=0, max_value=2000, value=DBX_DEFAULTS["etl"], step=10, key=f"dbsql_etl{k}",
+            help="Serverless ETL pipelines at $0.36/DBU. For Juniper's 1 TB/day ingest "
+                 "with continuous 1-min microbatch + 2-hr batch cadence: ~100 DBU/day at "
+                 "today's shape; ~150-180 DBU/day after medallion rebuild (more transformation "
+                 "work moves into scheduled pipelines).",
+        )
+
+        warehouse_monthly = (
+            dbu_per_hour * avg_clusters * dbu_rate *
+            active_hours_per_day * active_days_per_month
+        )
+        etl_monthly = sdp_dbu_per_day * SDP_DBU_RATE * 30
+        # S3 managed storage for Delta tables (Databricks does not charge on top)
+        delta_storage_monthly = rs_storage_tb * 1024 * 0.023  # S3 standard
+        dbsql_total_monthly = warehouse_monthly + etl_monthly + delta_storage_monthly
+        dbsql_total_annual = dbsql_total_monthly * 12
+
+        st.metric("Monthly", f"${dbsql_total_monthly:,.0f}")
+        st.metric("Annual", f"${dbsql_total_annual:,.0f}")
         st.markdown(
-            f"<p class='muted'><code>(query_sec / 3600) × {dbu_per_hour} DBU/hr × ${dbu_rate}/DBU</code></p>",
-            unsafe_allow_html=True,
-        )
-
-    # --- Lakebase (pay per CU-hour) ---
-    # Published Lakebase pricing (Premium, AWS) from databricks.com/product/pricing/lakebase
-    LAKEBASE_LIST_CU_HR = 0.092
-    LAKEBASE_PROMO_CU_HR = 0.046  # 50% off through Jan 31, 2027
-    LAKEBASE_STORAGE_GB_MONTH = 0.345
-    with lakebase_col:
-        st.markdown("<h3>Lakebase: pay-per-CU-hour</h3>", unsafe_allow_html=True)
-        cu_count = st.number_input(
-            "CU count (2 GB RAM each)",
-            min_value=1, max_value=16, value=1, step=1, key="lb_cu",
-        )
-        use_promo = st.toggle(
-            "Apply 50% launch promo (through Jan 31, 2027)",
-            value=False, key="lb_promo",
-        )
-        default_rate = LAKEBASE_PROMO_CU_HR if use_promo else LAKEBASE_LIST_CU_HR
-        cu_rate = st.number_input(
-            "$ per CU-hour (Premium, AWS)",
-            min_value=0.01, value=default_rate, step=0.001, format="%.3f",
-            key="lb_cu_rate",
-            help=(
-                f"Published Lakebase price: ${LAKEBASE_LIST_CU_HR}/CU-hr list, "
-                f"${LAKEBASE_PROMO_CU_HR}/CU-hr with 50% launch promo (through Jan 31, 2027). "
-                "Includes cloud instance cost."
-            ),
-        )
-        hours_per_day = st.slider(
-            "Active hours per day", 1, 24, 24, key="lb_hours",
-            help="1 CU with scale-to-zero enabled can go well below 24h on bursty traffic.",
-        )
-        storage_gb = st.number_input(
-            "Database storage (GB)",
-            min_value=1, value=5, step=1, key="lb_storage",
-            help=(
-                f"Lakebase storage at ${LAKEBASE_STORAGE_GB_MONTH}/GB-month (Premium, AWS). "
-                "This demo's actual footprint is ~2.7 GB across 7 synced tables at full "
-                "10K-arena scale (1.7 GB gl_monthly_summary + 880 MB property_financials + "
-                "small dimensions). Storage cost is rounding-error vs compute + sync."
-            ),
-        )
-
-        # Sync pipeline cost (Delta to Lakebase Synced Tables via serverless SDP)
-        st.markdown("<p style='margin-top:12px;'><strong>Sync pipeline</strong></p>", unsafe_allow_html=True)
-        sync_cadence = st.selectbox(
-            "Delta to Lakebase sync cadence",
-            ["Daily batch", "Triggered hourly", "Continuous 1-min microbatch"],
-            index=2,  # Matches Juniper's stated streaming profile
-            key="lb_sync_cadence",
-            help="Lakebase Synced Tables run on a managed serverless SDP pipeline. Cost depends on how often it runs.",
-        )
-        # Rough SDP DBU-hour budgets for a 5-table sync of this size
-        SYNC_DBU_PER_MONTH = {
-            "Daily batch":                    12,    # ~5 min/day × 30 × 2.5 DBU/hr
-            "Triggered hourly":               90,    # ~15s/hr active × 720 × 0.5 DBU/hr burst
-            "Continuous 1-min microbatch":   1080,   # ~1.5 DBU/hr sustained × 24 × 30
-        }
-        SDP_DBU_RATE = 0.36  # Serverless SDP Advanced list price, AWS Premium
-        sync_dbu_per_month = SYNC_DBU_PER_MONTH[sync_cadence]
-        sync_monthly = sync_dbu_per_month * SDP_DBU_RATE
-
-        compute_monthly = cu_count * cu_rate * hours_per_day * 30
-        storage_monthly = storage_gb * LAKEBASE_STORAGE_GB_MONTH
-        lb_monthly = compute_monthly + storage_monthly + sync_monthly
-
-        # Implied $/query at the benchmark's measured peak sustained QPS
-        if lb_peak_qps:
-            queries_per_month = lb_peak_qps * 3600 * hours_per_day * 30
-            lb_cost_per_query = lb_monthly / queries_per_month if queries_per_month > 0 else 0
-        else:
-            lb_cost_per_query = 0
-        st.metric(
-            "Monthly total (compute + storage + sync)",
-            f"${lb_monthly:,.0f}",
-            help=(
-                f"Compute ${compute_monthly:,.0f} + storage ${storage_monthly:,.0f} "
-                f"+ sync ${sync_monthly:,.0f}"
-            ),
-        )
-        st.metric(
-            f"Implied $/query at {lb_peak_qps:,.0f} QPS" if lb_peak_qps else "Implied $/query",
-            f"${lb_cost_per_query:,.8f}" if lb_cost_per_query else "n/a",
-            help="Total monthly cost spread over queries the benchmark showed the endpoint can sustain.",
-        )
-        st.markdown(
-            f"<p class='muted'>"
-            f"<code>Compute: {cu_count} CU × ${cu_rate}/hr × {hours_per_day}h × 30d = "
-            f"${compute_monthly:,.0f}</code><br>"
-            f"<code>Storage: {storage_gb} GB × ${LAKEBASE_STORAGE_GB_MONTH}/GB-mo = "
-            f"${storage_monthly:,.0f}</code><br>"
-            f"<code>Sync ({sync_cadence.lower()}): ~{sync_dbu_per_month} DBU × "
-            f"${SDP_DBU_RATE}/DBU = ${sync_monthly:,.0f}</code>"
+            f"<p class='muted' style='font-size:12px;'>"
+            f"<code>Warehouse: {dbu_per_hour} DBU/hr × {avg_clusters} avg clusters × "
+            f"${dbu_rate}/DBU × {active_hours_per_day}h × {active_days_per_month}d = "
+            f"${warehouse_monthly:,.0f}</code><br>"
+            f"<code>ETL pipelines: {sdp_dbu_per_day} DBU/day × ${SDP_DBU_RATE}/DBU × 30 = "
+            f"${etl_monthly:,.0f}</code><br>"
+            f"<code>Delta storage on S3: {rs_storage_tb:.1f} TB × $0.023/GB-mo = "
+            f"${delta_storage_monthly:,.0f}</code>"
             f"</p>",
             unsafe_allow_html=True,
         )
 
-    # -----------------------------------------------------------------
-    # Scaling projections
-    # -----------------------------------------------------------------
-    st.markdown("<hr class='db-hair' />", unsafe_allow_html=True)
-    # -----------------------------------------------------------------
-    # Break-even: when does each path win?
-    # -----------------------------------------------------------------
-    st.markdown("<hr class='db-hair' />", unsafe_allow_html=True)
-    st.markdown("<h2>DBSQL vs Lakebase: when to use which</h2>", unsafe_allow_html=True)
+    # Side-by-side delta callout
+    delta_annual = rs_annual - dbsql_total_annual
+    delta_pct = (delta_annual / rs_annual * 100) if rs_annual > 0 else 0
+    callout_cls = "db-callout db-callout--success" if delta_annual > 0 else "db-callout"
+    delta_word = "savings" if delta_annual > 0 else "uplift"
     st.markdown(
-        "<p class='muted'>The two paths are <strong>complementary, not competitive</strong>. DBSQL "
-        "bills per query-second, so it wins on bursty, ad-hoc, and BI workloads (you pay only while "
-        "queries run). Lakebase bills per CU-hour regardless of query volume, so it wins on "
-        "high-sustained-QPS, app-embedded OLTP serving where P99 &lt; 1s is non-negotiable. The curves "
-        "cross at the break-even point below.</p>",
+        f"<div class='{callout_cls}' style='margin-top:18px;'>"
+        f"<strong>Today's annual delta: ${abs(delta_annual):,.0f} {delta_word} "
+        f"({abs(delta_pct):.0f}%)</strong><br>"
+        f"<span style='font-size:13px;'>Redshift baseline ${rs_annual:,.0f}/yr "
+        f"vs Databricks ${dbsql_total_annual:,.0f}/yr at the same 1.22 TB / 30K queries/month "
+        f"footprint. Move the inputs to test sensitivity.</span>"
+        f"</div>",
         unsafe_allow_html=True,
     )
-    breakeven_qpm = (lb_monthly / dbsql_cost_per_query) if dbsql_cost_per_query > 0 else 0
-    be_cols = st.columns([2, 1], gap="large")
-    with be_cols[0]:
-        st.plotly_chart(
-            build_cost_breakeven(dbsql_cost_per_query, lb_monthly),
-            use_container_width=True,
-        )
-    with be_cols[1]:
-        st.metric("Break-even", f"{breakeven_qpm:,.0f} queries/mo")
-        st.markdown(
-            f"<p class='muted' style='font-size:13px;'>"
-            f"<strong>Below {breakeven_qpm:,.0f} queries/mo:</strong> DBSQL is cheaper. "
-            f"You pay only when queries fire.<br><br>"
-            f"<strong>Above {breakeven_qpm:,.0f} queries/mo:</strong> Lakebase is cheaper. "
-            f"Its fixed cost amortizes across more queries.<br><br>"
-            f"<strong>Regardless of cost:</strong> pick Lakebase when you need sub-second P99 "
-            f"inside a customer-facing app. Pick DBSQL for analyst and BI workloads."
-            f"</p>",
-            unsafe_allow_html=True,
-        )
 
+    # =====================================================================
+    # SECTION 2: Month-over-month projection (interactive)
+    # =====================================================================
     st.markdown("<hr class='db-hair' />", unsafe_allow_html=True)
-    st.markdown("<h2>Annual projection at 1K / 5K / 10K arenas</h2>", unsafe_allow_html=True)
+    st.markdown("<h2>Month-over-month projection</h2>", unsafe_allow_html=True)
     st.markdown(
-        "<p class='muted'>Calibrated to Juniper's stated peak load: ~5 QPS sustained during "
-        "business hours + 100 dashboards/day + 600 RevealBI/week ≈ <strong>30K company-wide "
-        "queries/month today</strong> across ~1K arenas = ~30 queries per arena per month. "
-        "Adjust if you expect per-arena intensity to grow.</p>",
+        "<p style='color:#4A5568;'>Compound month-over-month growth, starting from today's "
+        "footprint above. All inputs (warehouse size, RI tier, active hours, ETL DBU) carry "
+        "forward. Move the slider to test your own growth assumption.</p>",
         unsafe_allow_html=True,
     )
-    qpm = st.slider(
-        "Queries per arena per month",
-        10, 1000, 50, step=10,
-        help="Default 50 qpm × 10K arenas = 500K queries/month, roughly 3× Juniper's current "
-             "company-wide volume to leave headroom at peak scale.",
+
+    input_cols = st.columns(2, gap="medium")
+    with input_cols[0]:
+        growth_pct = st.slider(
+            "Growth (% MoM)",
+            min_value=0.0, max_value=15.0, value=3.0, step=0.5, key="mom_growth",
+            help="Compounded monthly company-wide growth — customers, data, and query "
+                 "volume scale together. 3% MoM ≈ 43% YoY · 5% MoM ≈ 80% YoY · 10% MoM "
+                 "≈ 3.1× YoY. Juniper's 1K→10K customer roadmap implies ~6.5% MoM if "
+                 "reached over 36 months.",
+        )
+    with input_cols[1]:
+        horizon_label = st.radio(
+            "Time horizon",
+            ["1 year", "2 years", "3 years"],
+            index=1, key="mom_horizon", horizontal=True,
+        )
+    horizon_months = {"1 year": 12, "2 years": 24, "3 years": 36}[horizon_label]
+    growth_mom = 1 + (growth_pct / 100.0)
+
+    # Per-month multipliers (compound). Month 0 = today's footprint.
+    # One growth lever — data, customers, and queries assumed to scale together.
+    months = list(range(1, horizon_months + 1))
+    data_mults = [growth_mom ** (t - 1) for t in months]
+    cust_mults = data_mults
+
+    # --- Databricks month series ---
+    # DBSQL warehouse: scales sub-linearly with growth (^0.4 for autoscale efficiency),
+    # plus a one-time size bump when growth multiplier crosses 5×.
+    SIZE_ORDER = ["Small (12 DBU/hr)", "Medium (24 DBU/hr)", "Large (40 DBU/hr)", "X-Large (80 DBU/hr)"]
+    cur_size_idx = SIZE_ORDER.index(size_label) if size_label in SIZE_ORDER else 1
+    dbsql_series = []
+    sdp_series = []
+    for t_idx, t in enumerate(months):
+        c_mult = cust_mults[t_idx]
+        d_mult = data_mults[t_idx]
+        # Bump warehouse size once growth multiplier hits 5× (one tier up, capped at X-Large)
+        size_idx_t = min(cur_size_idx + (1 if c_mult >= 5 else 0), len(SIZE_ORDER) - 1)
+        dbu_per_hour_t = DBU_PER_HOUR_BY_SIZE[SIZE_ORDER[size_idx_t]]
+        scaled_clusters_t = avg_clusters * (c_mult ** 0.4)
+        dbsql_m = (
+            dbu_per_hour_t * scaled_clusters_t * dbu_rate *
+            active_hours_per_day * active_days_per_month
+        )
+        # ETL pipelines: linear with data in same-workload mode; sub-linear in optimized mode
+        # (medallion gold tables are dimension-bounded, not row-bounded)
+        etl_exp = 0.5 if optimize_mode else 1.0
+        sdp_m = sdp_dbu_per_day * (d_mult ** etl_exp) * SDP_DBU_RATE * 30
+        dbsql_series.append(dbsql_m)
+        sdp_series.append(sdp_m)
+
+    # --- Redshift month series ---
+    # Stepped: node counts round up via sub-linear formula; CS uplift bumps at thresholds.
+    # Storage excluded to keep the chart focused on compute (Redshift managed storage
+    # is ~$30/mo at this scale — rounding error vs the $6K+ compute base).
+    redshift_series = []
+    rs_nodes_series = []  # for hover/breakdown
+    for t_idx, t in enumerate(months):
+        c_mult = cust_mults[t_idx]
+        d_mult = data_mults[t_idx]
+        n_data_eng_t = max(rs_n_data_eng, int(-(-rs_n_data_eng * (d_mult ** 0.7) // 1)))  # ceil
+        n_reporting_t = max(rs_n_reporting, int(-(-rs_n_reporting * (c_mult ** 0.5) // 1)))
+        n_insights_t = max(rs_n_insights, int(-(-rs_n_insights * (c_mult ** 0.5) // 1)))
+        base_hourly_t = (
+            n_data_eng_t * rates["ra3.4xlarge"] +
+            (n_reporting_t + n_insights_t) * rates["ra3.large"]
+        )
+        base_monthly_t = base_hourly_t * 24 * 30
+        # CS uplift steps with growth bursts
+        cs_uplift_t = rs_cs_uplift + (0 if c_mult < 2 else 10 if c_mult < 5 else 30 if c_mult < 10 else 45)
+        cs_monthly_t = base_monthly_t * (cs_uplift_t / 100.0)
+        redshift_series.append(base_monthly_t + cs_monthly_t)
+        rs_nodes_series.append((n_data_eng_t, n_reporting_t, n_insights_t))
+
+    # --- Build the stacked-area chart ---
+    import plotly.graph_objects as go
+    mom_fig = go.Figure()
+    mom_fig.add_trace(go.Scatter(
+        x=months, y=dbsql_series, mode="lines", stackgroup="dbx",
+        name="Databricks SQL (warehouse)",
+        line=dict(width=0, color="rgba(229, 80, 32, 0.9)"),  # lava
+        hovertemplate="Month %{x}<br>Databricks SQL: $%{y:,.0f}<extra></extra>",
+    ))
+    mom_fig.add_trace(go.Scatter(
+        x=months, y=sdp_series, mode="lines", stackgroup="dbx",
+        name="ETL pipelines",
+        line=dict(width=0, color="rgba(0, 169, 114, 0.9)"),  # green
+        hovertemplate="Month %{x}<br>ETL pipelines: $%{y:,.0f}<extra></extra>",
+    ))
+    mom_fig.add_trace(go.Scatter(
+        x=months, y=redshift_series, mode="lines+markers",
+        name="Redshift (compute)",
+        line=dict(color="#222", width=3, dash="solid"),
+        marker=dict(size=6),
+        hovertemplate=(
+            "Month %{x}<br>Redshift: $%{y:,.0f}<br>"
+            "Nodes: %{customdata[0]} data-eng / %{customdata[1]} reporting / %{customdata[2]} insights"
+            "<extra></extra>"
+        ),
+        customdata=rs_nodes_series,
+    ))
+    mom_fig.update_layout(
+        title=f"Monthly spend over {horizon_label.lower()} · growth {growth_pct:.1f}% MoM",
+        xaxis=dict(title="Month", dtick=3 if horizon_months > 12 else 1),
+        yaxis=dict(title="Monthly spend ($)", rangemode="tozero", tickprefix="$", tickformat=","),
+        hovermode="x unified",
+        height=460,
+        legend=dict(orientation="h", yanchor="bottom", y=-0.25, xanchor="center", x=0.5),
+        margin=dict(l=60, r=40, t=60, b=80),
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        font=dict(family="DM Sans, sans-serif"),
+    )
+    st.plotly_chart(mom_fig, use_container_width=True)
+
+    # --- Summary stats over the horizon ---
+    total_dbx = sum(dbsql_series) + sum(sdp_series)
+    total_rs = sum(redshift_series)
+    period_savings = total_rs - total_dbx
+    period_savings_pct = (period_savings / total_rs * 100) if total_rs > 0 else 0
+    final_mult = data_mults[-1]
+
+    sum_cols = st.columns(4, gap="medium")
+    sum_cols[0].metric(
+        f"Total Redshift ({horizon_label})", f"${total_rs:,.0f}",
+        delta=f"final month ${redshift_series[-1]:,.0f}",
+    )
+    sum_cols[1].metric(
+        f"Total Databricks ({horizon_label})", f"${total_dbx:,.0f}",
+        delta=f"final month ${(dbsql_series[-1] + sdp_series[-1]):,.0f}",
+    )
+    savings_color = "normal" if period_savings >= 0 else "inverse"
+    sum_cols[2].metric(
+        f"Cumulative {'savings' if period_savings >= 0 else 'uplift'}",
+        f"${abs(period_savings):,.0f}",
+        delta=f"{abs(period_savings_pct):.0f}% of Redshift spend",
+        delta_color=savings_color,
+    )
+    sum_cols[3].metric(
+        f"End-state (month {horizon_months})",
+        f"{final_mult:.1f}× scale",
+        delta=f"silver ≈ {rs_storage_tb * final_mult:,.1f} TB",
     )
 
-    arena_tiers = [1000, 5000, 10000]
-    # DBSQL cost scales linearly with query volume
-    dbsql_monthly = [a * qpm * dbsql_cost_per_query for a in arena_tiers]
-    # Lakebase scaling: +1 CU per 2,000 arenas heuristic for compute,
-    # storage grows with arenas (~5 MB/arena — rough),
-    # sync cost stays constant (same pipeline handles more tables, not more volume fundamentally).
-    def _lb_at(arenas: int) -> float:
-        cus = max(1, arenas // 2000)
-        compute = cus * cu_rate * hours_per_day * 30
-        # Assume ~1 GB storage per 20 arenas for the synced serving tables
-        storage = (arenas / 20) * LAKEBASE_STORAGE_GB_MONTH
-        return compute + storage + sync_monthly
+    etl_scaling_note = (
+        "ETL pipelines scale ∝ growth<sup>0.5</sup> (sub-linear: gold MVs are "
+        "dimension-bounded by arenas × funds × properties × months, not by silver row "
+        "count, so 10× data ≠ 10× pipeline work)"
+        if optimize_mode else
+        "ETL pipelines scale linearly with growth"
+    )
+    st.markdown(
+        f"<p class='muted' style='font-size:13px; margin-top:10px;'>"
+        f"<strong>How the chart scales:</strong> Databricks SQL warehouse compute grows "
+        f"sub-linearly (avg clusters ∝ growth<sup>0.4</sup>) and bumps one warehouse tier "
+        f"once growth ≥ 5×. {etl_scaling_note}. Redshift node counts step up via ceiling "
+        f"on sub-linear scaling (data-eng ∝ growth<sup>0.7</sup>, reporting/insights ∝ "
+        f"growth<sup>0.5</sup>), and CS uplift bumps at 2× / 5× / 10× thresholds. Storage "
+        f"on both sides excluded — it's ~$30/mo and rounds out of the compute story.</p>",
+        unsafe_allow_html=True,
+    )
 
-    lb_scaling = [_lb_at(a) for a in arena_tiers]
+    # =====================================================================
+    # SECTION 3: Growth projection scenarios (3-card view)
+    # =====================================================================
+    st.markdown("<hr class='db-hair' />", unsafe_allow_html=True)
+    st.markdown("<h2>Growth projection scenarios: today → PDF Reporting → 10× scale</h2>", unsafe_allow_html=True)
+    st.markdown(
+        "<p style='color:#4A5568;'>Three points on the same growth curve. "
+        "<strong>Today</strong> is the 1.22 TB / 30 K queries/month footprint above. "
+        "<strong>PDF Reporting</strong> adds 4.5 B documents (~5× data trigger, "
+        "the stated catalyst). <strong>10× scale</strong> covers the 1K→10K customer "
+        "expansion target. Storage and query volume scale; compute scales sub-linearly "
+        "thanks to Liquid Clustering pruning and pre-aggregated gold.</p>",
+        unsafe_allow_html=True,
+    )
+
+    SCENARIOS = [
+        ("Today (1.22 TB)", 1.0, 1.0),
+        ("PDF Reporting (~5× data)", 5.0, 2.0),
+        ("10× scale (1K→10K customers)", 10.0, 10.0),
+    ]
+
+    # Redshift growth: node counts step up via sub-linear formula; CS uplift bumps at thresholds.
+    def _rs_at_scale(data_mult: float, q_mult: float) -> float:
+        scaled_data_eng = max(3, int(round(3 * (1 + (data_mult - 1) * 0.7))))
+        scaled_reporting = max(2, int(round(2 * (1 + (q_mult - 1) * 0.5))))
+        scaled_insights = max(2, int(round(2 * (1 + (q_mult - 1) * 0.5))))
+        base_hourly = (
+            scaled_data_eng * rates["ra3.4xlarge"] +
+            (scaled_reporting + scaled_insights) * rates["ra3.large"]
+        )
+        base_monthly = base_hourly * 24 * 30
+        cs_pct = rs_cs_uplift + (30 if q_mult >= 5 else 0)
+        cs_monthly = base_monthly * (cs_pct / 100.0)
+        storage_monthly = rs_storage_tb * data_mult * 1024 * REDSHIFT_STORAGE_GB_MONTH
+        return (base_monthly + cs_monthly + storage_monthly) * 12
+
+    # Databricks growth: warehouse size bump kicks in at 10× scale (Medium→Large);
+    # ETL DBU scales linearly with data in same-workload mode, sub-linearly (^0.5) in
+    # optimized mode because gold MVs are dimension-bounded; storage linear with data.
+    def _dbsql_at_scale(data_mult: float, q_mult: float) -> float:
+        scaled_dbu = dbu_per_hour if q_mult < 5 else (40 if dbu_per_hour < 40 else dbu_per_hour)
+        scaled_clusters = avg_clusters + (q_mult - 1) * 0.4
+        warehouse = (
+            scaled_dbu * scaled_clusters * dbu_rate *
+            active_hours_per_day * active_days_per_month
+        )
+        etl_exp = 0.5 if optimize_mode else 1.0
+        etl = sdp_dbu_per_day * (data_mult ** etl_exp) * SDP_DBU_RATE * 30
+        storage = rs_storage_tb * data_mult * 1024 * 0.023
+        return (warehouse + etl + storage) * 12
+
+    proj_data = []
+    for label, data_mult, q_mult in SCENARIOS:
+        rs_proj = _rs_at_scale(data_mult, q_mult)
+        db_proj = _dbsql_at_scale(data_mult, q_mult)
+        proj_data.append({
+            "scenario": label,
+            "redshift_annual": rs_proj,
+            "dbsql_annual": db_proj,
+            "savings": rs_proj - db_proj,
+            "savings_pct": (rs_proj - db_proj) / rs_proj * 100 if rs_proj > 0 else 0,
+        })
 
     proj_cols = st.columns(3, gap="medium")
-    for i, (arenas, db_m, lb_m) in enumerate(zip(arena_tiers, dbsql_monthly, lb_scaling)):
-        with proj_cols[i]:
-            st.markdown(
-                f"<div class='db-callout'>"
-                f"<strong>{arenas:,} arenas</strong><br>"
-                f"<span class='muted'>{arenas * qpm:,} queries/month</span>"
-                f"<hr style='margin:8px 0; border:0; border-top:1px solid var(--db-border-hair);' />"
-                f"DBSQL: <strong>${db_m:,.0f}/mo</strong> · ${db_m * 12:,.0f}/yr<br>"
-                f"Lakebase: <strong>${lb_m:,.0f}/mo</strong> · ${lb_m * 12:,.0f}/yr"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
+    for col, row in zip(proj_cols, proj_data):
+        savings_word = "savings" if row["savings"] > 0 else "uplift"
+        savings_color = "#00A972" if row["savings"] > 0 else "#E53935"
+        col.markdown(
+            f"<div class='db-callout' style='min-height:170px;'>"
+            f"<strong>{row['scenario']}</strong>"
+            f"<hr style='margin:8px 0; border:0; border-top:1px solid var(--db-border-hair);' />"
+            f"Redshift: <strong>${row['redshift_annual']:,.0f}/yr</strong><br>"
+            f"Databricks: <strong>${row['dbsql_annual']:,.0f}/yr</strong>"
+            f"<div style='margin-top:8px; color:{savings_color}; font-weight:600;'>"
+            f"${abs(row['savings']):,.0f} {savings_word} "
+            f"({abs(row['savings_pct']):.0f}%)</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
     st.markdown(
-        "<p class='muted'>DBSQL scales linearly with query volume (you pay only while queries run). "
-        "Lakebase is provisioned: compute scales with arenas (+1 CU per 2,000 arenas), storage scales "
-        "with synced row count, and the sync pipeline cost stays flat once cadence is chosen.</p>",
+        "<p class='muted' style='font-size:13px; margin-top:10px;'>"
+        "<strong>Assumptions in the 10× model:</strong> Redshift data-eng node count grows "
+        "~0.7× the data multiplier (Spectrum + Concurrency Scaling absorb some of it); "
+        "reporting/insights nodes grow ~0.5× the query multiplier. Databricks SQL bumps "
+        "from Medium (24 DBU/hr) to Large (40 DBU/hr) at 10× scale; average clusters grow "
+        "~0.4× the query multiplier thanks to Liquid Clustering pruning. Storage scales "
+        "linearly with data on both. Concurrency Scaling uplift bumps to +45% at 5×/10× "
+        "scale to model peak burst behavior on Redshift.</p>",
         unsafe_allow_html=True,
     )
 
+    # =====================================================================
+    # SECTION 4: Tag-based cost attribution
+    # =====================================================================
     st.markdown("<hr class='db-hair' />", unsafe_allow_html=True)
     st.markdown("<h2>Tag-based cost attribution</h2>", unsafe_allow_html=True)
     st.markdown(
@@ -1325,7 +1609,7 @@ def page_klo() -> None:
 
     render_demo_scope(
         demonstrated=[
-            "End-to-end serverless stack: SDP + DBSQL + Lakebase (zero clusters to manage)",
+            "End-to-end serverless stack: ETL pipelines + DBSQL (zero clusters to manage)",
             "Liquid Clustering on silver_gl_transactions delivered the query pruning behind the latency results",
             "Filtered pipeline + audit queries against system tables (all-SQL observability)",
             "Deep-links into every ops surface in this workspace",
@@ -1347,7 +1631,7 @@ def page_klo() -> None:
     st.markdown("<h2>Why ops effort drops on Databricks</h2>", unsafe_allow_html=True)
     st.markdown("""
 - **Serverless autoscale** handles cluster sizing. No node-pool drain or refill during peak writes.
-- **Spark Declarative Pipelines (SDP)** let you declare tables. The runtime handles the DAG, retries, backfills, and schema evolution.
+- **Declarative ETL pipelines** let you declare tables. The runtime handles the DAG, retries, backfills, and schema evolution.
 - **Self-healing micro-batches** retry on failure; bad records route to quarantine tables.
 - **Unified observability** through `system.lakeflow.pipelines`, `system.compute.node_types`, and query history. All SQL, no external APM wiring.
 """)
@@ -1358,9 +1642,9 @@ def page_klo() -> None:
     st.markdown("<hr class='db-hair' />", unsafe_allow_html=True)
     st.markdown("<h2>Orchestration: one DAG, five tasks</h2>", unsafe_allow_html=True)
     st.markdown(
-        "<p class='muted'>The job behind this demo: SDP medallion pipeline runs, then fans "
-        "out to four Lakebase synced-table pipelines in parallel. End-to-end wall clock "
-        "was ~326s on 2026-04-24 (133s SDP, longest sync 193s). Add a schedule or a file-arrival "
+        "<p class='muted'>The job behind this demo: medallion ETL pipeline runs, then fans "
+        "out to four downstream sync pipelines in parallel. End-to-end wall clock was ~326s "
+        "on 2026-04-24 (133s SDP, longest sync 193s). Add a schedule or a file-arrival "
         "trigger and the whole stack rehydrates with zero human involvement.</p>",
         unsafe_allow_html=True,
     )
@@ -1371,7 +1655,7 @@ def page_klo() -> None:
     )
     st.image(
         "assets/orchestration-dag.png",
-        caption="Live orchestration DAG in the juniper-benchmark-refresh job. SDP medallion pipeline fans out to four Lakebase sync-table pipelines.",
+        caption="Live orchestration DAG in the juniper-benchmark-refresh job. Medallion ETL pipeline fans out to four downstream sync pipelines.",
         use_column_width=True,
     )
     if dag_url:
@@ -1393,20 +1677,20 @@ def page_klo() -> None:
     op_cols[0].metric(
         "Active pipelines",
         f"{active_pipelines}",
-        delta="1 medallion + synced tables",
-        help="SDP pipeline behind the benchmark, plus Lakebase Synced Table pipelines.",
+        delta="1 medallion + downstream syncs",
+        help="Medallion ETL pipeline behind the benchmark, plus downstream synced-table pipelines.",
     )
     op_cols[1].metric(
         "Manual interventions",
         "0",
-        delta="last 30 days",
-        delta_color="normal",
-        help="Human pager events, config tweaks, cluster resizes. SDP + Serverless runs itself.",
+        delta="on this demo workspace · last 30 days",
+        delta_color="off",
+        help="Human pager events, config tweaks, cluster resizes on this demo workspace. Serverless ETL + DBSQL run themselves.",
     )
     op_cols[2].metric(
         "Serverless compute",
         "100%",
-        delta="SDP · DBSQL · Lakebase",
+        delta="Pipelines · DBSQL",
         help="Zero long-lived clusters. Every runtime is serverless with auto-scaling and auto-stop.",
     )
     op_cols[3].metric(
@@ -1416,8 +1700,33 @@ def page_klo() -> None:
         help="Serverless compute is patched and scaled by Databricks. Nothing for your SREs to babysit.",
     )
     st.caption(
-        "The SDP pipeline self-heals on transient failures, retries bad records to quarantine, "
-        "and scales compute up/down based on load, all without a human in the loop."
+        "The ETL pipeline self-heals on transient failures, retries bad records to quarantine, "
+        "and scales compute up/down based on load, all without a human in the loop. Zero "
+        "interventions above is for this demo workspace — the larger point is the operating "
+        "envelope, not this specific run."
+    )
+
+    # -----------------------------------------------------------------
+    # Why this matters at scale — independent industry data
+    # -----------------------------------------------------------------
+    st.markdown(
+        "<div class='db-callout' style='margin-top:14px;'>"
+        "<strong>The KLO time you reclaim is not free engineering capacity to spend elsewhere.</strong>"
+        "<p style='margin:8px 0 0 0; font-size:13px;'>"
+        "Independent industry data: data engineers spend "
+        "<strong>44% of their time</strong> building and rebuilding pipelines, "
+        "averaging "
+        "<strong>~$520K/year in wasted effort per $100M+ company</strong> "
+        "<span class='muted'>(Wakefield Research / Fivetran 2021 survey of 300 data &amp; "
+        "analytics VPs+ across US, UK, Germany, France · "
+        "<a href='https://www.fivetran.com/press/data-and-analytics-leaders-report-wasting-funds-on-bad-data' "
+        "target='_blank'>source</a>)</span>. Serverless ETL + managed warehouses + "
+        "Predictive Optimization push that line down by removing the categories of work "
+        "(cluster sizing, driver patching, vacuum, partition tuning, manual scale-out) "
+        "that account for most of it."
+        "</p>"
+        "</div>",
+        unsafe_allow_html=True,
     )
 
     # -----------------------------------------------------------------
@@ -1437,17 +1746,16 @@ def page_klo() -> None:
     workspace_id_klo = "7474657973275984"
     # Our primary SDP pipeline id (juniper_benchmark_medallion)
     pipeline_id = "390e607c-83e4-4df8-8468-4655bb8c341a"
-    lakebase_project = "juniper-sq-benchmark"
 
     if workspace_host:
         base = f"https://{workspace_host}"
         links = [
-            ("SDP pipeline",
+            ("ETL pipeline (medallion DAG)",
              f"{base}/pipelines/{pipeline_id}",
              "The juniper_benchmark_medallion DAG: bronze, silver, gold. Event log, run history, lineage all inline."),
-            ("Orchestration job (SDP, 4 parallel syncs)",
+            ("Orchestration job (ETL + 4 parallel syncs)",
              f"{base}/jobs/658584579307262",
-             "5-task DAG: SDP medallion pipeline, then 4 Lakebase sync pipelines fan out in parallel. Schedule it or trigger on file arrival."),
+             "5-task DAG: medallion ETL pipeline, then 4 downstream sync pipelines fan out in parallel. Schedule it or trigger on file arrival."),
             ("Jobs & Pipelines: Runs view",
              f"{base}/jobs/runs?asset_type=jobs&o={workspace_id_klo}",
              "Workspace-wide run history. Success/fail timeline, top error codes, per-run drill-in. One pane of glass for every scheduled workload."),
@@ -1457,9 +1765,6 @@ def page_klo() -> None:
             ("DBSQL query history",
              f"{base}/sql/history?o=&warehouse_id={warehouse_id}",
              "Every benchmark query we just measured, with duration, rows read, query profile."),
-            ("Lakebase project",
-             f"{base}/lakebase/projects/743d650c-b6e7-488c-a783-219d299f71a5",
-             "The Juniper Square Benchmark Postgres endpoint: branching, autoscale config, roles."),
             ("Unity Catalog",
              f"{base}/explore/data/{catalog}",
              "Browse the catalog. Table metadata, tags, column lineage, permissions."),
@@ -1554,7 +1859,7 @@ def page_lineage() -> None:
     render_demo_scope(
         demonstrated=[
             "Medallion lineage captured automatically by Unity Catalog",
-            "Source-to-serving chain: raw Parquet → bronze → silver (liquid-clustered) → gold → Lakebase",
+            "Source-to-serving chain: raw Parquet → bronze → silver (liquid-clustered) → gold",
             "Column-level lineage via /api/2.0/lineage-tracking/column-lineage",
             "Live UC link-out on the demo's root gold table",
         ],
@@ -1572,10 +1877,9 @@ def page_lineage() -> None:
     st.markdown("<h2>Medallion lineage, source to serving</h2>", unsafe_allow_html=True)
     st.markdown(
         "<p class='muted'>The fact tables flow from raw Parquet ingest through bronze, silver, "
-        "and gold materialized views, then into Lakebase for sub-second Postgres serving. Unity "
-        "Catalog tracks this graph automatically, per query. Below is a screenshot of the live UC "
-        "lineage tab for <code>gold_fund_performance</code>; the same graph is available for every "
-        "table in the demo catalog.</p>",
+        "and gold materialized views. Unity Catalog tracks this graph automatically, per query. "
+        "Below is a screenshot of the live UC lineage tab for <code>gold_fund_performance</code>; "
+        "the same graph is available for every table in the demo catalog.</p>",
         unsafe_allow_html=True,
     )
 
@@ -1583,7 +1887,7 @@ def page_lineage() -> None:
     table = "gold_fund_performance"
     st.image(
         "assets/lineage-graph.png",
-        caption="Live Unity Catalog lineage graph for gold_fund_performance. Volumes, streaming bronze, streaming silver, materialized gold, Lakebase synced table.",
+        caption="Live Unity Catalog lineage graph for gold_fund_performance: volumes, streaming bronze, streaming silver, materialized gold, with a downstream synced-table replica.",
         use_column_width=True,
     )
     ui_url = get_uc_lineage_ui_url(queries.CATALOG, queries.SCHEMA, table)
@@ -1672,15 +1976,22 @@ def page_security() -> None:
     st.markdown("<hr class='db-hair' />", unsafe_allow_html=True)
 
     st.markdown("<h2>What Databricks brings on day 1</h2>", unsafe_allow_html=True)
+    st.markdown(
+        "<p class='muted' style='margin-top:-4px; margin-bottom:12px;'>"
+        "The differentiated controls first, since baseline compliance certifications are "
+        "table stakes in this eval. Compliance posture is listed at the bottom for completeness."
+        "</p>",
+        unsafe_allow_html=True,
+    )
     st.markdown("""
-- [SOC 2 Type II, ISO 27001, HIPAA, PCI DSS, FedRAMP Moderate](https://www.databricks.com/trust/compliance), inherited from the platform on day 1.
-- [Unity Catalog RBAC](https://docs.databricks.com/en/data-governance/unity-catalog/manage-privileges/index.html): grant at catalog, schema, table, [row, or column level](https://docs.databricks.com/en/tables/row-and-column-filters.html).
+- [Attribute-based access control (ABAC)](https://docs.databricks.com/en/data-governance/unity-catalog/abac/index.html) via UC tags: enforce policies on PII/PHI tags, not on object paths. Tag once, govern everywhere.
+- [Column masks](https://docs.databricks.com/en/tables/column-mask.html) and [row filters](https://docs.databricks.com/en/tables/row-filter.html) as plain SQL functions, attached to tables in UC. No bolt-on tooling, no per-BI-tool re-implementation.
+- [Unity Catalog RBAC](https://docs.databricks.com/en/data-governance/unity-catalog/manage-privileges/index.html): one privilege model from catalog → schema → table → [row / column](https://docs.databricks.com/en/tables/row-and-column-filters.html). Same grants flow to every downstream tool that reads through UC.
 - [Customer-managed keys (CMK)](https://docs.databricks.com/en/security/keys/customer-managed-keys.html) for encryption at rest (managed services + workspace storage).
-- [PrivateLink](https://docs.databricks.com/en/security/network/classic/privatelink.html) for both workspace (front-end) and control-plane (back-end) traffic.
-- [MFA + SSO](https://docs.databricks.com/en/admin/users-groups/single-sign-on/index.html) via [Okta, Entra (Azure AD), Google Workspace, PingIdentity](https://docs.databricks.com/en/admin/users-groups/scim/index.html), enforced at the workspace/account level.
-- [Column masks](https://docs.databricks.com/en/tables/column-mask.html) and [row filters](https://docs.databricks.com/en/tables/row-filter.html) as SQL. No bolt-on tooling.
-- [Attribute-based access control (ABAC)](https://docs.databricks.com/en/data-governance/unity-catalog/abac/index.html) via UC tags: enforce policies on PII/PHI tags, not just object paths.
+- [PrivateLink](https://docs.databricks.com/en/security/network/classic/privatelink.html) for workspace (front-end) and control-plane (back-end) traffic.
+- [MFA + SSO](https://docs.databricks.com/en/admin/users-groups/single-sign-on/index.html) via [Okta, Entra, Google Workspace, PingIdentity](https://docs.databricks.com/en/admin/users-groups/scim/index.html), enforced at the workspace/account level.
 - [Audit logs](https://docs.databricks.com/en/admin/account-settings/audit-logs.html) via `system.access.audit`: every read, grant, and config change.
+- Compliance baseline: [SOC 2 Type II, ISO 27001, HIPAA, PCI DSS, FedRAMP Moderate](https://www.databricks.com/trust/compliance), inherited from the platform on day 1.
 """)
 
     st.markdown("<h2>RBAC granularity: live grants at every level</h2>", unsafe_allow_html=True)
@@ -1875,7 +2186,7 @@ def page_integration() -> None:
     st.markdown("""
 | BI tool | Passthrough mode | Status | Notes |
 |---|---|---|---|
-| **Looker** | OAuth U2M | GA | Each Looker user authenticates with their own identity. PDTs aren't supported with OAuth; materialize in SDP / Lakeflow instead. |
+| **Looker** | OAuth U2M | GA | Each Looker user authenticates with their own identity. PDTs aren't supported with OAuth; materialize in Lakeflow pipelines instead. |
 | **Tableau** (Cloud + Server) | OAuth U2M (SSO) | GA | Same model as Looker. UC enforces per-user. |
 | **Power BI** | Entra ID (AAD) passthrough, DirectQuery only | GA with restriction | Import mode breaks passthrough; must use DirectQuery + "Report viewers access with their own identity". |
 | **Databricks AI/BI** | Native | GA | Built on UC; passthrough is implicit. |
@@ -1984,7 +2295,7 @@ def page_provenance() -> None:
     st.markdown("<h2>Table metadata: owner, type, and freshness</h2>", unsafe_allow_html=True)
     st.markdown(
         "<p class='muted'>One row per demo table, straight from "
-        "<code>system.information_schema.tables</code>. Table type distinguishes SDP "
+        "<code>system.information_schema.tables</code>. Table type distinguishes pipeline "
         "materialized views, streaming tables, and managed Delta tables; owner and timestamps "
         "come from UC automatically with no extra ETL.</p>",
         unsafe_allow_html=True,

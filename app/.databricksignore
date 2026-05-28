@@ -3,6 +3,8 @@ __pycache__
 *.pyc
 .databricks
 .skills
-mock_data
 .streamlit/secrets.toml
 .git
+.gitignore
+README.md
+.databricks-impeccable.md

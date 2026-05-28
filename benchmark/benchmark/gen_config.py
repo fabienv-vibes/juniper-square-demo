@@ -236,6 +236,7 @@ def main():
         "sustained_scenarios": base.get("sustained_scenarios", {}),
         "delta_persistence": base.get("delta_persistence", {}),
         "arena_id_pool": arena_id_pool,
+        "fund_id_pool": base.get("fund_id_pool", []),
         "queries": base.get("queries", []),
     }
 
@@ -248,6 +249,9 @@ def main():
     last5 = arena_id_pool[-5:]
     print(f"  Arena pool preview: {first5} ... {last5}")
     print(f"  Total arena IDs: {len(arena_id_pool)}")
+    fund_pool = base.get("fund_id_pool", [])
+    if fund_pool:
+        print(f"  Fund pool: {len(fund_pool)} IDs (e.g. {fund_pool[0]})")
     print(f"Note: Lakebase OAuth tokens expire after ~1 hour. Re-run this script to refresh.")
 
 

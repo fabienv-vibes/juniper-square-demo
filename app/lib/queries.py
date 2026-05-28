@@ -218,6 +218,12 @@ def get_sustained_runs() -> QueryResult:
               ),
               APPROX_PERCENTILE(p95_ms, 0.5)
             ) AS p95_median_ms,
+            COALESCE(
+              APPROX_PERCENTILE(
+                CASE WHEN query_name <> 'worst_case_yoy_growth' THEN p99_ms END, 0.5
+              ),
+              APPROX_PERCENTILE(p99_ms, 0.5)
+            ) AS p99_median_ms,
             MAX(p95_ms) AS p95_max_ms,
             SUM(successful) AS total_samples,
             SUM(failed) AS total_failures
@@ -236,6 +242,7 @@ def get_sustained_runs() -> QueryResult:
           r.notes,
           h.target,
           h.p95_median_ms,
+          h.p99_median_ms,
           h.p95_max_ms,
           h.total_samples,
           h.total_failures
@@ -700,3 +707,110 @@ def get_grant_history(hours: int = 24 * 30) -> QueryResult:
         LIMIT 50
     """
     return QueryResult(df=_mock_csv("grant_history"), preview_mode=False, sql=sql_text)
+
+
+def get_q8_headline() -> QueryResult:
+    """Q8 architectural-delta tiles: P95 for Q8a/Q8b × shape/refactored.
+
+    Pulls from benchmark_summary filtering on the 4 Q8 query names. Returns
+    one row per (query_name, target) with p95_ms + p50_ms + sample count.
+
+    Used by Overview Redline tiles. When the redline benchmark hasn't been run
+    yet, falls back to mock CSV with "pending" sentinel rows.
+    """
+    sql_text = f"""
+        SELECT
+          bs.query_name,
+          bs.target,
+          bs.p50_ms,
+          bs.p95_ms,
+          bs.p99_ms,
+          bs.mean_ms,
+          bs.successful,
+          bs.failed,
+          r.target_rate_qps,
+          r.mode,
+          r.started_at
+        FROM {CATALOG}.{SCHEMA}.benchmark_summary bs
+        JOIN {CATALOG}.{SCHEMA}.benchmark_runs r ON bs.run_id = r.run_id
+        WHERE bs.query_name IN ('q8_shape','q8_refactored')
+          AND r.mode = 'sustained'
+        QUALIFY ROW_NUMBER() OVER (
+          PARTITION BY bs.query_name, bs.target
+          ORDER BY r.started_at DESC
+        ) = 1
+        ORDER BY bs.query_name, bs.target
+    """
+    df, err = _run_sql(sql_text)
+    if df is None or df.empty:
+        return QueryResult(
+            df=_mock_csv("q8_headline"),
+            preview_mode=True,
+            error=err,
+            sql=sql_text,
+        )
+    return QueryResult(df=df, preview_mode=False, sql=sql_text)
+
+
+def get_q8_samples() -> QueryResult:
+    """Per-sample Q8 latencies for the strip plot.
+
+    Pulls benchmark_raw rows from the most-recent sustained run for each
+    (query_name, target_rate_qps) combo. The three combos that matter for
+    the Q8 re-run story:
+      - q8_shape       @ 1.0 QPS  → silver shape (30 min sustained)
+      - q8_refactored  @ 5.0 QPS  → medallion at BI peak rate
+      - q8_refactored  @ 10.0 QPS → medallion at 2× headroom
+
+    Warmup samples and failed queries are excluded server-side.
+    """
+    sql_text = f"""
+        WITH ranked_runs AS (
+          SELECT
+            r.run_id,
+            r.target_rate_qps,
+            bs.query_name,
+            r.started_at,
+            ROW_NUMBER() OVER (
+              PARTITION BY bs.query_name, r.target_rate_qps
+              ORDER BY r.started_at DESC
+            ) AS rk
+          FROM {CATALOG}.{SCHEMA}.benchmark_summary bs
+          JOIN {CATALOG}.{SCHEMA}.benchmark_runs r ON bs.run_id = r.run_id
+          WHERE bs.query_name IN ('q8_shape', 'q8_refactored')
+            AND r.mode = 'sustained'
+        ),
+        keep AS (
+          SELECT run_id, target_rate_qps, query_name, started_at
+          FROM ranked_runs WHERE rk = 1
+        )
+        SELECT
+          br.query_name,
+          k.target_rate_qps,
+          br.latency_ms,
+          br.queue_time_ms,
+          br.total_latency_ms,
+          br.scheduled_arrival_offset_ms,
+          br.actual_start_offset_ms
+        FROM {CATALOG}.{SCHEMA}.benchmark_raw br
+        JOIN keep k
+          ON br.run_id = k.run_id AND br.query_name = k.query_name
+        WHERE br.success = TRUE
+          AND br.is_warmup = FALSE
+        ORDER BY k.target_rate_qps, br.query_name, br.scheduled_arrival_offset_ms
+    """
+    df, err = _run_sql(sql_text)
+    if df is None or df.empty:
+        return QueryResult(
+            df=pd.DataFrame(
+                columns=[
+                    "query_name", "target_rate_qps", "latency_ms",
+                    "queue_time_ms", "total_latency_ms",
+                    "scheduled_arrival_offset_ms", "actual_start_offset_ms",
+                ]
+            ),
+            preview_mode=True,
+            error=err,
+            sql=sql_text,
+        )
+    return QueryResult(df=df, preview_mode=False, sql=sql_text)

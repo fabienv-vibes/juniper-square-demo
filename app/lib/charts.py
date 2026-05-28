@@ -633,3 +633,166 @@ def build_warmup_ramp(warmup_df: pd.DataFrame) -> go.Figure:
         height=320,
     )
     return _apply_base(fig, title="Cold-start ramp — IWM provisioning behavior")
+
+
+def build_q8_percentile_comparison(
+    headline_df: pd.DataFrame,
+    show: str = "both",
+) -> go.Figure:
+    """Grouped-bar P50/P95/P99 comparison: q8_shape vs q8_refactored.
+
+    Uses the same per-query percentile rows surfaced by get_q8_headline (most
+    recent sustained run). show: 'both' | 'q8_shape' | 'q8_refactored'.
+    Log-Y scale to handle the ~50× spread between silver shape and gold.
+    """
+    fig = go.Figure()
+    if headline_df is None or headline_df.empty:
+        return _apply_base(fig, title="Fund roll-up percentiles — no data")
+
+    # Only DBSQL target rows (Q8 is dbsql-only)
+    df = headline_df[headline_df["target"] == "dbsql"].copy()
+    if df.empty:
+        return _apply_base(fig, title="Fund roll-up percentiles — no DBSQL rows")
+
+    series_meta = [
+        ("q8_shape",      "Silver shape",        BRAND["lava"]),
+        ("q8_refactored", "Medallion refactor",  BRAND["green_500"]),
+    ]
+    percentile_keys = [("p50_ms", "P50"), ("p95_ms", "P95"), ("p99_ms", "P99")]
+    x_labels = [label for _, label in percentile_keys]
+    visible_count = 0
+
+    for name, series_label, color in series_meta:
+        if show not in ("both", name):
+            continue
+        row = df[df["query_name"] == name]
+        if row.empty:
+            continue
+        row = row.iloc[0]
+        y_values = [float(row[col]) if row[col] is not None else 0.0
+                    for col, _ in percentile_keys]
+        text_values = [_format_ms(v) for v in y_values]
+        fig.add_trace(go.Bar(
+            x=x_labels,
+            y=y_values,
+            name=series_label,
+            marker_color=color,
+            text=text_values,
+            textposition="outside",
+            textfont=dict(family="DM Sans", size=12, color=BRAND.get("text", "#1A1F2C")),
+            hovertemplate=(
+                f"<b>{series_label}</b><br>"
+                "%{x}: %{y:,.0f} ms"
+                "<extra></extra>"
+            ),
+        ))
+        visible_count += 1
+
+    use_log = visible_count > 1
+    fig.update_layout(
+        xaxis=dict(title="Percentile"),
+        yaxis=dict(
+            title="Latency (ms, log scale)" if use_log else "Latency (ms)",
+            type="log" if use_log else "linear",
+            rangemode="tozero" if not use_log else "normal",
+        ),
+        barmode="group",
+        height=400,
+        legend=dict(orientation="h", yanchor="bottom", y=-0.22, xanchor="center", x=0.5),
+        margin=dict(l=60, r=60, t=60, b=70),
+    )
+    return _apply_base(fig, title="Fund roll-up latency: silver shape vs medallion refactor")
+
+
+def build_q8_latency_timeline(
+    samples_df: pd.DataFrame,
+    show: str = "all",
+) -> go.Figure:
+    """Per-sample strip plot of Q8 latencies across the three sustained runs.
+
+    Each marker is one measured query (warmup excluded). Three series tagged
+    by (query_name, target_rate_qps):
+      - q8_shape       @ 1.0 QPS  → silver shape (30 min sustained)
+      - q8_refactored  @ 5.0 QPS  → medallion at BI peak rate
+      - q8_refactored  @ 10.0 QPS → medallion at 2× headroom
+
+    Plots server-side latency (latency_ms — excludes queue time) on log-Y so
+    the ~50× spread between silver and gold is visible without crushing detail.
+
+    `show` selects visible series: 'all' | 'silver' | 'medallion'.
+    """
+    fig = go.Figure()
+    if samples_df is None or samples_df.empty:
+        return _apply_base(fig, title="Per-sample fund roll-up latency — no data")
+
+    series_meta = [
+        ("silver",    "q8_shape",      1.0,  "Silver shape · 1 QPS",
+            BRAND["lava"], "diamond", 7, 0.75),
+        ("medallion", "q8_refactored", 10.0, "Medallion · 10 QPS",
+            BRAND["green_500"], "circle", 5, 0.55),
+    ]
+    visible_count = 0
+
+    import numpy as np
+    p95_lines = []  # collect (label, color, p95_ms) to draw after all traces
+
+    for key, q_name, qps, label, color, symbol, size, opacity in series_meta:
+        if show not in ("all", key):
+            continue
+        sub = samples_df[
+            (samples_df["query_name"] == q_name)
+            & (samples_df["target_rate_qps"].astype(float) == qps)
+        ]
+        if sub.empty:
+            continue
+        # Normalize each series to start at t=0 — silver and medallion runs had
+        # different warmup window cutoffs (silver 5 min, medallion 30 s), so their
+        # first measurement offsets are wildly different in absolute terms. The
+        # x-axis shows seconds into the measurement window, not wall clock.
+        offsets_ms = sub["scheduled_arrival_offset_ms"].astype(float)
+        t0 = offsets_ms.min()
+        x_sec = (offsets_ms - t0) / 1000.0
+        latencies = sub["latency_ms"].astype(float)
+        p95 = float(np.percentile(latencies, 95))
+        fig.add_trace(go.Scatter(
+            x=x_sec,
+            y=latencies,
+            mode="markers",
+            name=f"{label} (n={len(sub):,}, P95={p95:,.0f} ms)",
+            marker=dict(color=color, size=size, symbol=symbol, opacity=opacity),
+            hovertemplate=(
+                f"<b>{label}</b><br>"
+                "t=%{x:,.0f}s into measurement<br>"
+                "latency=%{y:,.0f} ms"
+                "<extra></extra>"
+            ),
+        ))
+        p95_lines.append((label, color, p95))
+        visible_count += 1
+
+    # Draw P95 reference lines AFTER all sample traces so labels sit on top.
+    for label, color, p95 in p95_lines:
+        fig.add_hline(
+            y=p95,
+            line=dict(color=color, width=1.5, dash="dash"),
+            annotation_text=f"P95 · {label.split(' · ')[0].strip()} · {p95:,.0f} ms",
+            annotation_position="top right",
+            annotation_font=dict(family="DM Sans", size=11, color=color),
+            opacity=0.85,
+        )
+
+    use_log = visible_count > 1
+    fig.update_layout(
+        xaxis=dict(title="Seconds into measurement window (each series starts at t=0)"),
+        yaxis=dict(
+            title="Server-side latency (ms, log scale)" if use_log else "Server-side latency (ms)",
+            type="log" if use_log else "linear",
+        ),
+        height=440,
+        legend=dict(orientation="h", yanchor="bottom", y=-0.22, xanchor="center", x=0.5),
+        margin=dict(l=60, r=60, t=60, b=70),
+    )
+    return _apply_base(
+        fig,
+        title="Per-sample fund roll-up latency: silver shape vs medallion refactor",
+    )

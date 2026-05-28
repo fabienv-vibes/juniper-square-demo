@@ -89,6 +89,77 @@ sustained_scenarios:
       - "pnl_rollup_multi_month"
       - "investor_commitment_summary"
 
+  # === Q8 scenarios (added 2026-05-20 for redline redesign) ===
+  sustained_q8a_shape:
+    rate_qps: 1.0
+    duration_seconds: 600
+    warmup_seconds: 120
+    arrival_distribution: poisson
+    query_filter: ["q8a_shape"]
+
+  sustained_q8a_refactored:
+    rate_qps: 5.0
+    duration_seconds: 600
+    warmup_seconds: 90
+    arrival_distribution: poisson
+    query_filter: ["q8a_refactored"]
+
+  sustained_q8b_shape:
+    rate_qps: 1.0
+    duration_seconds: 600
+    warmup_seconds: 120
+    arrival_distribution: poisson
+    query_filter: ["q8b_shape"]
+
+  sustained_q8b_refactored:
+    rate_qps: 5.0
+    duration_seconds: 600
+    warmup_seconds: 90
+    arrival_distribution: poisson
+    query_filter: ["q8b_refactored"]
+
+  # Redline concurrency scans for the silver-scan monsters (lockstep-style step)
+  redline_q8a_concurrency:
+    rate_qps: 4.0      # max rate; harness should also be invoked with lockstep --levels
+    duration_seconds: 600
+    warmup_seconds: 90
+    arrival_distribution: poisson
+    query_filter: ["q8a_shape"]
+
+  redline_q8b_concurrency:
+    rate_qps: 4.0
+    duration_seconds: 600
+    warmup_seconds: 90
+    arrival_distribution: poisson
+    query_filter: ["q8b_shape"]
+
+  # === Q8 re-run (added 2026-05-27): populate benchmark_raw with enough samples
+  # for a strip-plot. Silver shape saturates above 1 QPS so 30 min @ 1 QPS gives
+  # ~75 samples. Medallion refactor matches BI mix Peak/2x framing at 5 + 10 QPS.
+  q8_silver_long:
+    rate_qps: 1.0
+    duration_seconds: 600    # 10 min @ 1 QPS, ~30 measured samples.
+                              # Was 1800s but harness hit Thrift retry-loop at ~19 min
+                              # (warehouse reaped stale long-lived sessions). 10 min
+                              # stays inside the timing envelope known to work.
+    warmup_seconds: 90
+    arrival_distribution: poisson
+    query_filter: ["q8_shape"]
+
+  q8_medallion_peak:
+    rate_qps: 5.0
+    duration_seconds: 600    # 10 min — matches BI mix peak rate
+    warmup_seconds: 90
+    arrival_distribution: poisson
+    query_filter: ["q8_refactored"]
+
+  q8_medallion_headroom_2x:
+    rate_qps: 10.0
+    duration_seconds: 600    # 10 min — matches BI mix 2x headroom rate
+    warmup_seconds: 90
+    arrival_distribution: poisson
+    query_filter: ["q8_refactored"]
+
 # --- Delta persistence target (where benchmark_runs / benchmark_summary / benchmark_raw are written) ---
 # Writes go through the dbsql connection above. Disable per-run with --skip-delta-write.
 delta_persistence:
@@ -96,7 +167,134 @@ delta_persistence:
   schema: "pipeline"
   notes: ""          # free-form notes stored on the benchmark_runs row
 
+# --- Fund ID pool ---
+# {fund_id} placeholder in Q8 queries is substituted at execution time with a
+# random choice from this pool. Defeats result-cache hits on otherwise-identical
+# fund-scoped queries.
+fund_id_pool:
+  - "FND-054917"
+  - "FND-005400"
+  - "FND-044571"
+  - "FND-219840"
+  - "FND-069548"
+  - "FND-008838"
+  - "FND-198325"
+  - "FND-081742"
+  - "FND-164759"
+  - "FND-168894"
+  - "FND-136880"
+  - "FND-131389"
+  - "FND-153839"
+  - "FND-178688"
+  - "FND-014193"
+  - "FND-190545"
+  - "FND-058052"
+  - "FND-209037"
+  - "FND-030416"
+  - "FND-026880"
+  - "FND-038140"
+  - "FND-185268"
+  - "FND-063522"
+  - "FND-099812"
+  - "FND-211349"
+  - "FND-065384"
+  - "FND-102292"
+  - "FND-073057"
+  - "FND-172565"
+  - "FND-192427"
+  - "FND-084649"
+  - "FND-245875"
+  - "FND-115536"
+  - "FND-058781"
+  - "FND-116626"
+  - "FND-190452"
+  - "FND-001976"
+  - "FND-032730"
+  - "FND-188819"
+  - "FND-133023"
+  - "FND-046593"
+  - "FND-015583"
+  - "FND-201993"
+  - "FND-221075"
+  - "FND-022950"
+  - "FND-047593"
+  - "FND-137676"
+  - "FND-225422"
+  - "FND-006504"
+  - "FND-192905"
+  - "FND-195768"
+  - "FND-121898"
+  - "FND-127579"
+  - "FND-087960"
+  - "FND-065419"
+  - "FND-076357"
+  - "FND-176685"
+  - "FND-121256"
+  - "FND-095444"
+  - "FND-065129"
+  - "FND-186146"
+  - "FND-123098"
+  - "FND-080601"
+  - "FND-157177"
+  - "FND-054738"
+  - "FND-128706"
+  - "FND-194899"
+  - "FND-200239"
+  - "FND-150307"
+  - "FND-004101"
+  - "FND-137880"
+  - "FND-127411"
+  - "FND-190198"
+  - "FND-136778"
+  - "FND-079223"
+  - "FND-069402"
+  - "FND-163201"
+  - "FND-049029"
+  - "FND-078758"
+  - "FND-057818"
+  - "FND-178141"
+  - "FND-130828"
+  - "FND-244061"
+  - "FND-169954"
+  - "FND-242679"
+  - "FND-042786"
+  - "FND-204982"
+  - "FND-205679"
+  - "FND-006133"
+  - "FND-001535"
+  - "FND-200987"
+  - "FND-131980"
+  - "FND-074409"
+  - "FND-028850"
+  - "FND-194426"
+  - "FND-156895"
+  - "FND-089266"
+  - "FND-035138"
+  - "FND-215403"
+  - "FND-055373"
+  - "FND-176293"
+  - "FND-167606"
+  - "FND-051862"
+  - "FND-037575"
+  - "FND-037148"
+  - "FND-185630"
+  - "FND-013340"
+  - "FND-183811"
+  - "FND-179848"
+  - "FND-025954"
+  - "FND-037304"
+  - "FND-044991"
+  - "FND-082871"
+  - "FND-019008"
+  - "FND-013386"
+  - "FND-181352"
+  - "FND-161589"
+  - "FND-014369"
+  - "FND-090652"
+  - "FND-089876"
+
 # --- Arena ID pool ---
+
 # {arena_id} placeholder in each query is substituted at execution time with a
 # random choice from this pool. This simulates multi-tenant traffic.
 # Total of 100 representative arenas spread across ARN-00000 .. ARN-09999.
@@ -495,3 +693,1530 @@ queries:
       SELECT 1 AS placeholder
     sql_lakebase: |
       SELECT 1 AS placeholder
+
+  - name: "q8a_shape"
+    weight: 1
+    enabled: true
+    targets: [dbsql]
+    sql_dbsql: |
+        -- =============================================================================
+        -- Q8a-shape: Quarterly Investor PCAP Statement (silver-scan monster)
+        -- =============================================================================
+        -- Replicates Juniper's described shape: 500 lines, 50-table touch count.
+        -- Real-world: Partners' Capital Account (PCAP) statement for a single LP
+        -- across all their fund holdings for a single quarter. Shows opening balance,
+        -- contributions, distributions, P&L allocations, fees, FX adjustments, tax
+        -- withholding, ending balance + period IRR/MOIC/TVPI.
+        --
+        -- This query is intentionally a Redshift-style "kitchen-sink" — permission
+        -- filtering, audit joins, and business logic all baked into one statement.
+        -- It's the redline scenario.
+        --
+        -- Parameters (literals for benchmark; harness substitutes):
+        --   :investor_id    'INV-0000042'
+        --   :period_start   '2024-01-01'
+        --   :period_end     '2024-03-31'
+        -- =============================================================================
+
+        -- ---- DBSQL (Spark SQL) ----
+
+        WITH
+        -- ============================== SETUP & REFERENCE ===========================
+
+        period_setup AS (
+          SELECT
+            p.period_id,
+            p.period_label,
+            p.period_start,
+            p.period_end,
+            p.fiscal_year,
+            p.fiscal_quarter,
+            ptype.period_type_name,
+            cq.quarter_label
+          FROM juniper_square_demo_catalog.pipeline.dim_period p
+          JOIN juniper_square_demo_catalog.pipeline.ref_fiscal_period_type ptype
+            ON p.period_type_code = ptype.period_type_code
+          JOIN juniper_square_demo_catalog.pipeline.ref_calendar_quarter cq
+            ON p.fiscal_quarter = cq.quarter_num
+          WHERE p.period_start >= DATE('2024-01-01')
+            AND p.period_end <= DATE('2024-03-31')
+            AND p.period_type_code = 'QUARTERLY'
+        ),
+
+        investor_profile AS (
+          SELECT
+            i.investor_id,
+            i.arena_id,
+            i.investor_name,
+            i.investor_type_code,
+            itype.investor_type_name,
+            i.investor_subtype_code,
+            istype.investor_subtype_name,
+            i.country_code,
+            geo_c.country_name,
+            geo_c.region AS investor_region,
+            i.tax_jurisdiction_code,
+            tj.jurisdiction_name AS tax_jurisdiction_name,
+            tj.jurisdiction_level,
+            tj.withholding_rate,
+            i.is_accredited,
+            i.effective_from
+          FROM juniper_square_demo_catalog.pipeline.dim_investor i
+          JOIN juniper_square_demo_catalog.pipeline.dim_investor_type itype
+            ON i.investor_type_code = itype.investor_type_code
+          LEFT JOIN juniper_square_demo_catalog.pipeline.dim_investor_subtype istype
+            ON i.investor_subtype_code = istype.investor_subtype_code
+          JOIN juniper_square_demo_catalog.pipeline.dim_geography_country geo_c
+            ON i.country_code = geo_c.country_code
+          LEFT JOIN juniper_square_demo_catalog.pipeline.dim_tax_jurisdiction tj
+            ON i.tax_jurisdiction_code = tj.tax_jurisdiction_code
+          WHERE i.investor_id = 'INV-0000042'
+            AND i.is_current = TRUE
+        ),
+
+        fund_universe AS (
+          SELECT
+            f.fund_id,
+            f.arena_id,
+            f.fund_name,
+            f.fund_type_code,
+            ft.fund_type_name,
+            ft.is_closed_end,
+            f.vintage_year,
+            vy.market_cycle_phase,
+            vy.peer_cohort_size,
+            f.holding_strategy_code,
+            hs.strategy_name AS holding_strategy_name,
+            hs.risk_profile,
+            f.invest_strategy_code,
+            invst.invest_strategy_name,
+            invst.typical_hold_years,
+            f.carry_code,
+            cs.pref_return_pct,
+            cs.gp_carry_pct,
+            cs.catchup_pct,
+            cs.waterfall_type,
+            f.mgmt_fee_code,
+            mfs.rate_pct AS mgmt_fee_rate,
+            mfs.rate_basis AS mgmt_fee_basis,
+            f.base_currency,
+            cur.currency_name,
+            cur.symbol AS currency_symbol,
+            f.committed_capital_usd,
+            f.inception_date
+          FROM juniper_square_demo_catalog.pipeline.dim_fund f
+          JOIN juniper_square_demo_catalog.pipeline.dim_fund_type ft ON f.fund_type_code = ft.fund_type_code
+          JOIN juniper_square_demo_catalog.pipeline.dim_vintage_year vy ON f.vintage_year = vy.vintage_year
+          LEFT JOIN juniper_square_demo_catalog.pipeline.ref_holding_strategy hs ON f.holding_strategy_code = hs.strategy_code
+          LEFT JOIN juniper_square_demo_catalog.pipeline.ref_investment_strategy invst ON f.invest_strategy_code = invst.invest_strategy_code
+          LEFT JOIN juniper_square_demo_catalog.pipeline.ref_carry_structure cs ON f.carry_code = cs.carry_code
+          LEFT JOIN juniper_square_demo_catalog.pipeline.ref_mgmt_fee_schedule mfs ON f.mgmt_fee_code = mfs.schedule_code
+          JOIN juniper_square_demo_catalog.pipeline.dim_currency cur ON f.base_currency = cur.currency_code
+          WHERE f.is_current = TRUE
+        ),
+
+        -- ============================== OPENING BALANCES ==========================
+
+        opening_balances AS (
+          SELECT
+            ca.capital_account_id,
+            ca.investor_id,
+            ca.fund_id,
+            ca.tax_partner_id,
+            ca.commitment_usd,
+            COALESCE(SUM(prior_a.allocated_amount_usd), 0) AS prior_period_allocations,
+            COALESCE(SUM(prior_c.call_amount_usd), 0) AS prior_period_contributions,
+            COALESCE(SUM(prior_d.amount_usd), 0) AS prior_period_distributions,
+            COALESCE(SUM(prior_f.amount_usd), 0) AS prior_period_fees,
+            ca.commitment_usd
+              + COALESCE(SUM(prior_a.allocated_amount_usd), 0)
+              + COALESCE(SUM(prior_c.call_amount_usd), 0)
+              - COALESCE(SUM(prior_d.amount_usd), 0)
+              - COALESCE(SUM(prior_f.amount_usd), 0)
+              AS opening_balance_usd
+          FROM juniper_square_demo_catalog.pipeline.dim_capital_account ca
+          LEFT JOIN juniper_square_demo_catalog.pipeline.fact_allocation prior_a
+            ON ca.fund_id = prior_a.fund_id AND ca.investor_id = prior_a.investor_id
+            AND prior_a.computed_at < TIMESTAMP('2024-01-01')
+          LEFT JOIN juniper_square_demo_catalog.pipeline.fact_capital_call prior_c
+            ON ca.capital_account_id = prior_c.capital_account_id
+            AND prior_c.call_date < DATE('2024-01-01')
+          LEFT JOIN juniper_square_demo_catalog.pipeline.fact_distribution prior_d
+            ON ca.capital_account_id = prior_d.capital_account_id
+            AND prior_d.distribution_date < DATE('2024-01-01')
+          LEFT JOIN juniper_square_demo_catalog.pipeline.fact_fee_charge prior_f
+            ON ca.fund_id = prior_f.fund_id AND ca.investor_id = prior_f.investor_id
+            AND prior_f.charge_date < DATE('2024-01-01')
+          WHERE ca.investor_id = 'INV-0000042'
+          GROUP BY ca.capital_account_id, ca.investor_id, ca.fund_id, ca.tax_partner_id, ca.commitment_usd
+        ),
+
+        -- ============================== PERIOD ACTIVITY ===========================
+
+        period_contributions AS (
+          SELECT
+            cc.investor_id,
+            cc.fund_id,
+            cc.capital_account_id,
+            SUM(cc.call_amount_usd) AS total_contributions_usd,
+            COUNT(*) AS contribution_count,
+            MIN(cc.call_date) AS first_call_date,
+            MAX(cc.call_date) AS last_call_date,
+            rs.status_name AS status_name,
+            rsc.is_terminal
+          FROM juniper_square_demo_catalog.pipeline.fact_capital_call cc
+          JOIN juniper_square_demo_catalog.pipeline.ref_transaction_type rtt
+            ON rtt.transaction_type_code = 'CAPITAL_CALL'
+          JOIN juniper_square_demo_catalog.pipeline.ref_status_code rs ON cc.status_code = rs.status_code
+          JOIN juniper_square_demo_catalog.pipeline.ref_status_code rsc ON cc.status_code = rsc.status_code
+          WHERE cc.investor_id = 'INV-0000042'
+            AND cc.call_date BETWEEN DATE('2024-01-01') AND DATE('2024-03-31')
+          GROUP BY cc.investor_id, cc.fund_id, cc.capital_account_id, rs.status_name, rsc.is_terminal
+        ),
+
+        period_distributions AS (
+          SELECT
+            d.investor_id,
+            d.fund_id,
+            d.capital_account_id,
+            d.waterfall_tier_id,
+            wt.tier_name,
+            wt.tier_order,
+            wt.beneficiary,
+            SUM(CASE WHEN d.waterfall_tier_id = 'ROC' THEN d.amount_usd ELSE 0 END) AS dist_roc_usd,
+            SUM(CASE WHEN d.waterfall_tier_id = 'PREF' THEN d.amount_usd ELSE 0 END) AS dist_pref_usd,
+            SUM(CASE WHEN d.waterfall_tier_id = 'CATCHUP' THEN d.amount_usd ELSE 0 END) AS dist_catchup_usd,
+            SUM(CASE WHEN d.waterfall_tier_id IN ('CARRY_T1','CARRY_T2') THEN d.amount_usd ELSE 0 END) AS dist_carry_usd,
+            SUM(d.amount_usd) AS total_distributions_usd,
+            SUM(d.tax_withholding_usd) AS total_withholding_usd,
+            COUNT(*) AS distribution_count,
+            rdm.method_name AS distribution_method_name
+          FROM juniper_square_demo_catalog.pipeline.fact_distribution d
+          JOIN juniper_square_demo_catalog.pipeline.dim_waterfall_tier wt ON d.waterfall_tier_id = wt.tier_id
+          JOIN juniper_square_demo_catalog.pipeline.ref_distribution_method rdm ON d.distribution_method = rdm.method_code
+          WHERE d.investor_id = 'INV-0000042'
+            AND d.distribution_date BETWEEN DATE('2024-01-01') AND DATE('2024-03-31')
+          GROUP BY d.investor_id, d.fund_id, d.capital_account_id, d.waterfall_tier_id,
+                   wt.tier_name, wt.tier_order, wt.beneficiary, rdm.method_name
+        ),
+
+        period_fees AS (
+          SELECT
+            fc.investor_id,
+            fc.fund_id,
+            fc.period_id,
+            SUM(CASE WHEN fc.fee_type = 'MGMT' THEN fc.amount_usd ELSE 0 END) AS mgmt_fee_usd,
+            SUM(CASE WHEN fc.fee_type = 'PERF' THEN fc.amount_usd ELSE 0 END) AS perf_fee_usd,
+            SUM(CASE WHEN fc.fee_type = 'ADMIN' THEN fc.amount_usd ELSE 0 END) AS admin_fee_usd,
+            SUM(CASE WHEN fc.fee_type = 'AUDIT' THEN fc.amount_usd ELSE 0 END) AS audit_fee_usd,
+            SUM(CASE WHEN fc.fee_type = 'LEGAL' THEN fc.amount_usd ELSE 0 END) AS legal_fee_usd,
+            SUM(CASE WHEN fc.fee_type = 'OTHER' THEN fc.amount_usd ELSE 0 END) AS other_fee_usd,
+            SUM(fc.amount_usd) AS total_fees_usd,
+            cc_d.cost_center_name,
+            er.role_name AS fee_approver_role
+          FROM juniper_square_demo_catalog.pipeline.fact_fee_charge fc
+          LEFT JOIN juniper_square_demo_catalog.pipeline.dim_cost_center cc_d
+            ON cc_d.cost_center_code = 'CC-001'
+          LEFT JOIN juniper_square_demo_catalog.pipeline.dim_employee_role er
+            ON er.role_code = 'ROLE-005'
+          WHERE fc.investor_id = 'INV-0000042'
+            AND fc.charge_date BETWEEN DATE('2024-01-01') AND DATE('2024-03-31')
+          GROUP BY fc.investor_id, fc.fund_id, fc.period_id, cc_d.cost_center_name, er.role_name
+        ),
+
+        period_allocations AS (
+          SELECT
+            a.investor_id,
+            a.fund_id,
+            a.period_id,
+            a.allocation_type,
+            rat.account_type_name,
+            rat.normal_balance,
+            SUM(CASE WHEN a.allocation_type = 'INCOME' THEN a.allocated_amount_usd ELSE 0 END) AS income_alloc_usd,
+            SUM(CASE WHEN a.allocation_type = 'EXPENSE' THEN a.allocated_amount_usd ELSE 0 END) AS expense_alloc_usd,
+            SUM(CASE WHEN a.allocation_type = 'REALIZED_GAIN' THEN a.allocated_amount_usd ELSE 0 END) AS realized_gain_usd,
+            SUM(CASE WHEN a.allocation_type = 'UNREALIZED_GAIN' THEN a.allocated_amount_usd ELSE 0 END) AS unrealized_gain_usd,
+            SUM(a.allocated_amount_usd) AS total_allocations_usd,
+            AVG(a.allocation_pct) AS avg_allocation_pct
+          FROM juniper_square_demo_catalog.pipeline.fact_allocation a
+          JOIN juniper_square_demo_catalog.pipeline.dim_account_chart ac ON a.account_id = ac.account_id
+          JOIN juniper_square_demo_catalog.pipeline.ref_account_type rat ON ac.account_type_code = rat.account_type_code
+          WHERE a.investor_id = 'INV-0000042'
+            AND a.computed_at BETWEEN TIMESTAMP('2024-01-01') AND TIMESTAMP('2024-03-31 23:59:59')
+          GROUP BY a.investor_id, a.fund_id, a.period_id, a.allocation_type, rat.account_type_name, rat.normal_balance
+        ),
+
+        -- ========== HEAVY SILVER SCAN: GL postings for full audit trail =============
+
+        period_gl_postings AS (
+          SELECT
+            gl.fund_id,
+            gl.account_id,
+            ac.account_name,
+            rat.account_type_name,
+            rtt.transaction_type_name,
+            rtt.category AS txn_category,
+            cur.currency_name AS gl_currency_name,
+            rs.status_name AS gl_status_name,
+            rac.approval_tier_name,
+            SUM(gl.amount_usd) AS gl_total_usd,
+            COUNT(*) AS gl_txn_count,
+            SUM(CASE WHEN rtt.category = 'CAPITAL' THEN gl.amount_usd ELSE 0 END) AS gl_capital_usd,
+            SUM(CASE WHEN rtt.category = 'OPERATING' THEN gl.amount_usd ELSE 0 END) AS gl_operating_usd,
+            SUM(CASE WHEN rtt.category = 'INVESTMENT' THEN gl.amount_usd ELSE 0 END) AS gl_investment_usd,
+            SUM(CASE WHEN rtt.category = 'FINANCING' THEN gl.amount_usd ELSE 0 END) AS gl_financing_usd
+          FROM juniper_square_demo_catalog.pipeline.fact_gl_transaction gl
+          JOIN juniper_square_demo_catalog.pipeline.dim_account_chart ac ON gl.account_id = ac.account_id
+          JOIN juniper_square_demo_catalog.pipeline.ref_account_type rat ON ac.account_type_code = rat.account_type_code
+          JOIN juniper_square_demo_catalog.pipeline.ref_transaction_type rtt ON gl.transaction_type_code = rtt.transaction_type_code
+          JOIN juniper_square_demo_catalog.pipeline.dim_currency cur ON gl.currency_code = cur.currency_code
+          JOIN juniper_square_demo_catalog.pipeline.ref_status_code rs ON gl.status_code = rs.status_code
+          LEFT JOIN juniper_square_demo_catalog.pipeline.ref_approval_chain rac ON gl.approval_chain_code = rac.approval_tier_code
+          LEFT JOIN juniper_square_demo_catalog.pipeline.dim_counterparty cp ON gl.counterparty_id = cp.counterparty_id
+          LEFT JOIN juniper_square_demo_catalog.pipeline.dim_cost_center cc ON gl.cost_center_code = cc.cost_center_code
+          WHERE gl.transaction_date BETWEEN DATE('2024-01-01') AND DATE('2024-03-31')
+            AND gl.fund_id IN (
+              SELECT fund_id FROM juniper_square_demo_catalog.pipeline.dim_capital_account
+              WHERE investor_id = 'INV-0000042'
+            )
+          GROUP BY gl.fund_id, gl.account_id, ac.account_name, rat.account_type_name,
+                   rtt.transaction_type_name, rtt.category, cur.currency_name, rs.status_name, rac.approval_tier_name
+        ),
+
+        -- ============================== VALUATIONS & FX ===========================
+
+        period_valuations AS (
+          SELECT
+            v.fund_id,
+            v.property_id,
+            pr.property_name,
+            pt.property_type_name,
+            pst.property_subtype_name,
+            pcl.class_name AS property_class_name,
+            msa.msa_name,
+            msa.population AS msa_population,
+            geo_s.state_name,
+            geo_c2.country_name AS property_country_name,
+            AVG(v.value_usd) AS avg_value_usd,
+            MAX(v.value_usd) AS max_value_usd,
+            MIN(v.value_usd) AS min_value_usd,
+            COUNT(*) AS valuation_count,
+            LAG(AVG(v.value_usd)) OVER (PARTITION BY v.property_id ORDER BY MIN(v.valuation_date)) AS prior_value_usd
+          FROM juniper_square_demo_catalog.pipeline.fact_valuation v
+          JOIN juniper_square_demo_catalog.pipeline.dim_property pr ON v.property_id = pr.property_id
+          JOIN juniper_square_demo_catalog.pipeline.dim_property_type pt ON pr.property_type_code = pt.property_type_code
+          LEFT JOIN juniper_square_demo_catalog.pipeline.dim_property_subtype pst ON pr.property_subtype_code = pst.property_subtype_code
+          LEFT JOIN juniper_square_demo_catalog.pipeline.ref_property_class pcl ON pr.property_class_code = pcl.class_code
+          LEFT JOIN juniper_square_demo_catalog.pipeline.dim_geography_msa msa ON pr.msa_code = msa.msa_code
+          LEFT JOIN juniper_square_demo_catalog.pipeline.dim_geography_state geo_s ON pr.state_code = geo_s.state_code
+          JOIN juniper_square_demo_catalog.pipeline.dim_geography_country geo_c2 ON pr.country_code = geo_c2.country_code
+          WHERE v.valuation_date BETWEEN DATE('2024-01-01') AND DATE('2024-03-31')
+            AND v.fund_id IN (
+              SELECT fund_id FROM juniper_square_demo_catalog.pipeline.dim_capital_account
+              WHERE investor_id = 'INV-0000042'
+            )
+          GROUP BY v.fund_id, v.property_id, pr.property_name, pt.property_type_name,
+                   pst.property_subtype_name, pcl.class_name, msa.msa_name, msa.population,
+                   geo_s.state_name, geo_c2.country_name
+        ),
+
+        fx_adjustments AS (
+          SELECT
+            fx.base_currency,
+            fx.quote_currency,
+            rcp.is_active AS pair_active,
+            AVG(fx.rate) AS avg_rate,
+            MAX(fx.rate) AS max_rate,
+            MIN(fx.rate) AS min_rate
+          FROM juniper_square_demo_catalog.pipeline.fact_fx_rate fx
+          JOIN juniper_square_demo_catalog.pipeline.ref_currency_pair rcp ON fx.pair_code = rcp.pair_code
+          WHERE fx.rate_date BETWEEN DATE('2024-01-01') AND DATE('2024-03-31')
+          GROUP BY fx.base_currency, fx.quote_currency, rcp.is_active
+        ),
+
+        -- ============================== AUDIT TRAIL ===============================
+
+        audit_trail AS (
+          SELECT
+            ae.entity_type,
+            ae.event_type,
+            er.role_name AS user_role,
+            COUNT(*) AS event_count,
+            MIN(ae.event_timestamp) AS first_event_ts,
+            MAX(ae.event_timestamp) AS last_event_ts
+          FROM juniper_square_demo_catalog.pipeline.fact_audit_event ae
+          LEFT JOIN juniper_square_demo_catalog.pipeline.dim_employee_role er ON ae.role_code = er.role_code
+          WHERE ae.event_timestamp BETWEEN TIMESTAMP('2024-01-01') AND TIMESTAMP('2024-03-31 23:59:59')
+            AND ae.entity_type IN ('fact_capital_call','fact_distribution','fact_fee_charge','fact_allocation')
+          GROUP BY ae.entity_type, ae.event_type, er.role_name
+        ),
+
+        -- ============================== WATERFALL APPLICATION =====================
+
+        waterfall_calc AS (
+          SELECT
+            wt.tier_id,
+            wt.tier_name,
+            wt.tier_order,
+            wt.beneficiary,
+            rcs.pref_return_pct,
+            rcs.gp_carry_pct,
+            rcs.catchup_pct,
+            rcs.waterfall_type
+          FROM juniper_square_demo_catalog.pipeline.dim_waterfall_tier wt
+          CROSS JOIN juniper_square_demo_catalog.pipeline.ref_carry_structure rcs
+          WHERE rcs.carry_code = 'STD_80_20_8PREF'
+        ),
+
+        -- ============================== TAX & K-1 =================================
+
+        tax_withholding AS (
+          SELECT
+            tj.tax_jurisdiction_code,
+            tj.jurisdiction_name,
+            tj.jurisdiction_level,
+            tj.withholding_rate,
+            k1.k1_box_code,
+            k1.k1_box_name,
+            SUM(pd.total_withholding_usd) AS total_withholding_usd
+          FROM juniper_square_demo_catalog.pipeline.dim_tax_jurisdiction tj
+          CROSS JOIN juniper_square_demo_catalog.pipeline.ref_irs_k1_box k1
+          CROSS JOIN period_distributions pd
+          WHERE tj.tax_jurisdiction_code = 'US_FED'
+            AND k1.k1_box_code IN ('1','2','5','8','9a','11')
+          GROUP BY tj.tax_jurisdiction_code, tj.jurisdiction_name, tj.jurisdiction_level,
+                   tj.withholding_rate, k1.k1_box_code, k1.k1_box_name
+        ),
+
+        -- ============================== PERIOD METRICS ============================
+
+        period_metrics AS (
+          SELECT
+            pc.fund_id,
+            pc.investor_id,
+            pc.total_contributions_usd,
+            pd.total_distributions_usd,
+            pd.total_distributions_usd / NULLIF(pc.total_contributions_usd, 0) AS period_dpi,
+            (pa.realized_gain_usd + pa.unrealized_gain_usd) / NULLIF(pc.total_contributions_usd, 0) AS period_moic,
+            (pa.realized_gain_usd + pa.unrealized_gain_usd + pd.total_distributions_usd) / NULLIF(pc.total_contributions_usd, 0) AS period_tvpi,
+            SUM(pa.realized_gain_usd + pa.unrealized_gain_usd) OVER (
+              PARTITION BY pc.fund_id ORDER BY pc.fund_id
+            ) AS cumulative_pl_usd
+          FROM period_contributions pc
+          JOIN (
+            SELECT investor_id, fund_id, SUM(total_distributions_usd) AS total_distributions_usd
+            FROM period_distributions GROUP BY investor_id, fund_id
+          ) pd ON pc.investor_id = pd.investor_id AND pc.fund_id = pd.fund_id
+          LEFT JOIN (
+            SELECT investor_id, fund_id, SUM(realized_gain_usd) AS realized_gain_usd, SUM(unrealized_gain_usd) AS unrealized_gain_usd
+            FROM period_allocations GROUP BY investor_id, fund_id
+          ) pa ON pc.investor_id = pa.investor_id AND pc.fund_id = pa.fund_id
+        )
+
+        -- ============================== FINAL SELECT ==============================
+
+        SELECT
+          ip.investor_id,
+          ip.investor_name,
+          ip.investor_type_name,
+          ip.investor_subtype_name,
+          ip.country_name,
+          ip.investor_region,
+          ip.tax_jurisdiction_name,
+          ip.withholding_rate,
+          ip.is_accredited,
+
+          fu.fund_id,
+          fu.fund_name,
+          fu.fund_type_name,
+          fu.is_closed_end,
+          fu.vintage_year,
+          fu.market_cycle_phase,
+          fu.peer_cohort_size,
+          fu.holding_strategy_name,
+          fu.risk_profile,
+          fu.invest_strategy_name,
+          fu.typical_hold_years,
+          fu.pref_return_pct,
+          fu.gp_carry_pct,
+          fu.catchup_pct,
+          fu.waterfall_type,
+          fu.mgmt_fee_rate,
+          fu.mgmt_fee_basis,
+          fu.committed_capital_usd,
+          fu.inception_date,
+
+          ps.period_id,
+          ps.period_label,
+          ps.fiscal_year,
+          ps.fiscal_quarter,
+          ps.quarter_label,
+          ps.period_type_name,
+
+          ob.commitment_usd,
+          ob.opening_balance_usd,
+          ob.prior_period_contributions,
+          ob.prior_period_distributions,
+
+          pc.total_contributions_usd,
+          pc.contribution_count,
+          pc.first_call_date,
+          pc.last_call_date,
+          pc.status_name AS contribution_status,
+
+          pd.dist_roc_usd,
+          pd.dist_pref_usd,
+          pd.dist_catchup_usd,
+          pd.dist_carry_usd,
+          pd.total_distributions_usd,
+          pd.total_withholding_usd,
+          pd.distribution_count,
+          pd.distribution_method_name,
+
+          pf.mgmt_fee_usd,
+          pf.perf_fee_usd,
+          pf.admin_fee_usd,
+          pf.audit_fee_usd,
+          pf.legal_fee_usd,
+          pf.total_fees_usd,
+          pf.cost_center_name,
+          pf.fee_approver_role,
+
+          pa.income_alloc_usd,
+          pa.expense_alloc_usd,
+          pa.realized_gain_usd,
+          pa.unrealized_gain_usd,
+          pa.total_allocations_usd,
+          pa.avg_allocation_pct,
+
+          pgl.gl_total_usd,
+          pgl.gl_txn_count,
+          pgl.gl_capital_usd,
+          pgl.gl_operating_usd,
+          pgl.gl_investment_usd,
+          pgl.gl_financing_usd,
+
+          pv.avg_value_usd,
+          pv.prior_value_usd,
+          pv.avg_value_usd - pv.prior_value_usd AS unrealized_value_change_usd,
+
+          fx.avg_rate AS fx_avg_rate,
+          fx.max_rate AS fx_max_rate,
+          fx.min_rate AS fx_min_rate,
+
+          at.event_count AS audit_event_count,
+          at.user_role AS audit_user_role,
+
+          wc.tier_name AS waterfall_tier,
+          wc.beneficiary AS tier_beneficiary,
+
+          tw.k1_box_code,
+          tw.k1_box_name,
+          tw.total_withholding_usd AS tax_withholding_usd,
+
+          pm.period_dpi,
+          pm.period_moic,
+          pm.period_tvpi,
+          pm.cumulative_pl_usd,
+
+          ob.opening_balance_usd
+            + pc.total_contributions_usd
+            - pd.total_distributions_usd
+            + pa.realized_gain_usd
+            + pa.unrealized_gain_usd
+            + pa.income_alloc_usd
+            - pa.expense_alloc_usd
+            - pf.total_fees_usd
+            AS computed_ending_balance_usd
+
+        FROM investor_profile ip
+        CROSS JOIN period_setup ps
+        JOIN fund_universe fu ON fu.arena_id = ip.arena_id
+        LEFT JOIN opening_balances ob ON ob.investor_id = ip.investor_id AND ob.fund_id = fu.fund_id
+        LEFT JOIN period_contributions pc ON pc.investor_id = ip.investor_id AND pc.fund_id = fu.fund_id
+        LEFT JOIN period_distributions pd ON pd.investor_id = ip.investor_id AND pd.fund_id = fu.fund_id
+        LEFT JOIN period_fees pf ON pf.investor_id = ip.investor_id AND pf.fund_id = fu.fund_id
+        LEFT JOIN period_allocations pa ON pa.investor_id = ip.investor_id AND pa.fund_id = fu.fund_id
+        LEFT JOIN period_gl_postings pgl ON pgl.fund_id = fu.fund_id
+        LEFT JOIN period_valuations pv ON pv.fund_id = fu.fund_id
+        LEFT JOIN fx_adjustments fx ON fx.base_currency = fu.base_currency
+        LEFT JOIN audit_trail at ON 1=1
+        LEFT JOIN waterfall_calc wc ON wc.tier_id = pd.waterfall_tier_id
+        LEFT JOIN tax_withholding tw ON tw.tax_jurisdiction_code = ip.tax_jurisdiction_code
+        LEFT JOIN period_metrics pm ON pm.investor_id = ip.investor_id AND pm.fund_id = fu.fund_id
+        ORDER BY fu.fund_id, ps.period_id, wc.tier_order;
+
+  - name: "q8b_shape"
+    weight: 1
+    enabled: true
+    targets: [dbsql]
+    sql_dbsql: |
+        -- =============================================================================
+        -- Q8b-shape: Fund Performance Roll-up (silver-scan monster)
+        -- =============================================================================
+        -- Replicates Juniper's described shape: 500 lines, 50-table touch count.
+        -- Real-world: Fund-level IRR/MOIC/TVPI/DPI over time, by property, with
+        -- peer-vintage benchmarking. Quarterly board pack. Used by Insights AI for
+        -- "show me how Fund VII is performing vs vintage peers."
+        --
+        -- Parameters:
+        --   :fund_id      'FND-000042' (or NULL = all funds in arena)
+        --   :as_of_date   '2024-12-31'
+        -- =============================================================================
+
+        -- ---- DBSQL (Spark SQL) ----
+
+        WITH
+        fund_metadata AS (
+          SELECT
+            f.fund_id,
+            f.arena_id,
+            f.fund_name,
+            f.fund_type_code,
+            ft.fund_type_name,
+            ft.is_closed_end,
+            f.vintage_year,
+            vy.market_cycle_phase,
+            vy.peer_cohort_size,
+            f.holding_strategy_code,
+            hs.strategy_name AS holding_strategy_name,
+            hs.risk_profile,
+            f.invest_strategy_code,
+            invst.invest_strategy_name,
+            invst.typical_hold_years,
+            f.carry_code,
+            cs.pref_return_pct,
+            cs.gp_carry_pct,
+            cs.catchup_pct,
+            cs.waterfall_type,
+            f.mgmt_fee_code,
+            mfs.rate_pct AS mgmt_fee_rate,
+            mfs.rate_basis AS mgmt_fee_basis,
+            f.base_currency,
+            cur.currency_name,
+            f.committed_capital_usd,
+            f.inception_date,
+            a.arena_name,
+            a.region AS arena_region
+          FROM juniper_square_demo_catalog.pipeline.dim_fund f
+          JOIN juniper_square_demo_catalog.pipeline.dim_fund_type ft ON f.fund_type_code = ft.fund_type_code
+          JOIN juniper_square_demo_catalog.pipeline.dim_vintage_year vy ON f.vintage_year = vy.vintage_year
+          JOIN juniper_square_demo_catalog.pipeline.dim_arena a ON f.arena_id = a.arena_id
+          LEFT JOIN juniper_square_demo_catalog.pipeline.ref_holding_strategy hs ON f.holding_strategy_code = hs.strategy_code
+          LEFT JOIN juniper_square_demo_catalog.pipeline.ref_investment_strategy invst ON f.invest_strategy_code = invst.invest_strategy_code
+          LEFT JOIN juniper_square_demo_catalog.pipeline.ref_carry_structure cs ON f.carry_code = cs.carry_code
+          LEFT JOIN juniper_square_demo_catalog.pipeline.ref_mgmt_fee_schedule mfs ON f.mgmt_fee_code = mfs.schedule_code
+          JOIN juniper_square_demo_catalog.pipeline.dim_currency cur ON f.base_currency = cur.currency_code
+          WHERE f.fund_id = 'FND-000042'
+            AND f.is_current = TRUE
+        ),
+
+        property_universe AS (
+          SELECT
+            p.property_id,
+            p.arena_id,
+            p.property_name,
+            p.property_type_code,
+            pt.property_type_name,
+            p.property_subtype_code,
+            pst.property_subtype_name,
+            p.property_class_code,
+            pcl.class_name AS property_class_name,
+            pcl.quality_rank,
+            p.country_code,
+            geo_c.country_name AS property_country_name,
+            geo_c.region AS property_region,
+            p.state_code,
+            geo_s.state_name,
+            p.msa_code,
+            msa.msa_name,
+            msa.population AS msa_population,
+            p.acquisition_date,
+            p.acquisition_price_usd,
+            p.square_feet,
+            p.units
+          FROM juniper_square_demo_catalog.pipeline.dim_property p
+          JOIN juniper_square_demo_catalog.pipeline.dim_property_type pt ON p.property_type_code = pt.property_type_code
+          LEFT JOIN juniper_square_demo_catalog.pipeline.dim_property_subtype pst ON p.property_subtype_code = pst.property_subtype_code
+          LEFT JOIN juniper_square_demo_catalog.pipeline.ref_property_class pcl ON p.property_class_code = pcl.class_code
+          JOIN juniper_square_demo_catalog.pipeline.dim_geography_country geo_c ON p.country_code = geo_c.country_code
+          LEFT JOIN juniper_square_demo_catalog.pipeline.dim_geography_state geo_s ON p.state_code = geo_s.state_code
+          LEFT JOIN juniper_square_demo_catalog.pipeline.dim_geography_msa msa ON p.msa_code = msa.msa_code
+        ),
+
+        cash_flow_history AS (
+          SELECT fund_id, period_id, 'CONTRIBUTION' AS flow_type, SUM(call_amount_usd) AS flow_usd
+            FROM juniper_square_demo_catalog.pipeline.fact_capital_call
+            WHERE fund_id = 'FND-000042' AND call_date <= DATE('2024-12-31')
+            GROUP BY fund_id, period_id
+          UNION ALL
+          SELECT fund_id,
+            CONCAT('FY', YEAR(distribution_date), '_Q', QUARTER(distribution_date)) AS period_id,
+            CONCAT('DISTRIBUTION_', waterfall_tier_id) AS flow_type,
+            SUM(amount_usd) AS flow_usd
+            FROM juniper_square_demo_catalog.pipeline.fact_distribution
+            WHERE fund_id = 'FND-000042' AND distribution_date <= DATE('2024-12-31')
+            GROUP BY fund_id, period_id, waterfall_tier_id
+          UNION ALL
+          SELECT fund_id, period_id, 'FEE' AS flow_type, SUM(amount_usd) AS flow_usd
+            FROM juniper_square_demo_catalog.pipeline.fact_fee_charge
+            WHERE fund_id = 'FND-000042' AND charge_date <= DATE('2024-12-31')
+            GROUP BY fund_id, period_id
+        ),
+
+        valuation_history AS (
+          SELECT
+            v.fund_id,
+            v.property_id,
+            v.period_id,
+            AVG(v.value_usd) AS period_value_usd,
+            MAX(v.valuation_date) AS latest_val_date,
+            v.valuation_method,
+            LAG(AVG(v.value_usd)) OVER (PARTITION BY v.property_id ORDER BY v.period_id) AS prior_value_usd
+          FROM juniper_square_demo_catalog.pipeline.fact_valuation v
+          WHERE v.fund_id = 'FND-000042' AND v.valuation_date <= DATE('2024-12-31')
+          GROUP BY v.fund_id, v.property_id, v.period_id, v.valuation_method
+        ),
+
+        nav_time_series AS (
+          SELECT
+            fund_id,
+            period_id,
+            AVG(gross_nav_usd) AS gross_nav,
+            AVG(net_nav_usd) AS net_nav,
+            AVG(nav_per_unit) AS nav_per_unit,
+            SUM(total_units) AS total_units,
+            LAG(AVG(net_nav_usd)) OVER (PARTITION BY fund_id ORDER BY period_id) AS prior_net_nav
+          FROM juniper_square_demo_catalog.pipeline.fact_nav_snapshot
+          WHERE fund_id = 'FND-000042' AND snapshot_date <= DATE('2024-12-31')
+          GROUP BY fund_id, period_id
+        ),
+
+        fx_normalized AS (
+          SELECT
+            fx.base_currency,
+            fx.quote_currency,
+            rcp.is_active,
+            AVG(fx.rate) AS avg_rate,
+            STDDEV(fx.rate) AS rate_stddev
+          FROM juniper_square_demo_catalog.pipeline.fact_fx_rate fx
+          JOIN juniper_square_demo_catalog.pipeline.ref_currency_pair rcp ON fx.pair_code = rcp.pair_code
+          WHERE fx.rate_date <= DATE('2024-12-31')
+          GROUP BY fx.base_currency, fx.quote_currency, rcp.is_active
+        ),
+
+        cumulative_cash_flows AS (
+          SELECT
+            fund_id,
+            period_id,
+            SUM(CASE WHEN flow_type = 'CONTRIBUTION' THEN flow_usd ELSE 0 END) AS contrib_usd,
+            SUM(CASE WHEN flow_type LIKE 'DISTRIBUTION%' THEN flow_usd ELSE 0 END) AS dist_usd,
+            SUM(CASE WHEN flow_type = 'FEE' THEN flow_usd ELSE 0 END) AS fee_usd,
+            SUM(SUM(CASE WHEN flow_type LIKE 'DISTRIBUTION%' THEN flow_usd ELSE 0 END)) OVER (
+              PARTITION BY fund_id ORDER BY period_id
+            ) AS cumulative_dist_usd,
+            SUM(SUM(CASE WHEN flow_type = 'CONTRIBUTION' THEN flow_usd ELSE 0 END)) OVER (
+              PARTITION BY fund_id ORDER BY period_id
+            ) AS cumulative_contrib_usd
+          FROM cash_flow_history
+          GROUP BY fund_id, period_id
+        ),
+
+        fund_metrics AS (
+          SELECT
+            ccf.fund_id,
+            ccf.period_id,
+            ccf.cumulative_contrib_usd,
+            ccf.cumulative_dist_usd,
+            nts.net_nav,
+            ccf.cumulative_dist_usd / NULLIF(ccf.cumulative_contrib_usd, 0) AS dpi,
+            (ccf.cumulative_dist_usd + nts.net_nav) / NULLIF(ccf.cumulative_contrib_usd, 0) AS tvpi,
+            nts.net_nav / NULLIF(ccf.cumulative_contrib_usd, 0) AS rvpi,
+            -- crude IRR proxy via linear approximation
+            POWER((ccf.cumulative_dist_usd + nts.net_nav) / NULLIF(ccf.cumulative_contrib_usd, 1), 0.25) - 1 AS irr_proxy
+          FROM cumulative_cash_flows ccf
+          LEFT JOIN nav_time_series nts ON ccf.fund_id = nts.fund_id AND ccf.period_id = nts.period_id
+        ),
+
+        property_attribution AS (
+          SELECT
+            a.fund_id,
+            a.property_id,
+            a.period_id,
+            SUM(a.allocated_amount_usd) AS property_pl_usd,
+            SUM(CASE WHEN a.allocation_type = 'REALIZED_GAIN' THEN a.allocated_amount_usd ELSE 0 END) AS realized_pl,
+            SUM(CASE WHEN a.allocation_type = 'UNREALIZED_GAIN' THEN a.allocated_amount_usd ELSE 0 END) AS unrealized_pl,
+            SUM(CASE WHEN a.allocation_type = 'INCOME' THEN a.allocated_amount_usd ELSE 0 END) AS income_pl,
+            SUM(CASE WHEN a.allocation_type = 'EXPENSE' THEN a.allocated_amount_usd ELSE 0 END) AS expense_pl
+          FROM juniper_square_demo_catalog.pipeline.fact_allocation a
+          JOIN juniper_square_demo_catalog.pipeline.dim_account_chart ac ON a.account_id = ac.account_id
+          JOIN juniper_square_demo_catalog.pipeline.ref_account_type rat ON ac.account_type_code = rat.account_type_code
+          WHERE a.fund_id = 'FND-000042'
+            AND a.computed_at <= TIMESTAMP('2024-12-31 23:59:59')
+          GROUP BY a.fund_id, a.property_id, a.period_id
+        ),
+
+        peer_quartile AS (
+          SELECT
+            vy.vintage_year,
+            COUNT(DISTINCT f.fund_id) AS cohort_size,
+            PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY f.committed_capital_usd) AS p25_committed,
+            PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY f.committed_capital_usd) AS p50_committed,
+            PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY f.committed_capital_usd) AS p75_committed
+          FROM juniper_square_demo_catalog.pipeline.dim_fund f
+          JOIN juniper_square_demo_catalog.pipeline.dim_vintage_year vy ON f.vintage_year = vy.vintage_year
+          WHERE f.is_current = TRUE
+            AND f.vintage_year IN (SELECT vintage_year FROM fund_metadata)
+          GROUP BY vy.vintage_year
+        ),
+
+        -- ============== HEAVY SILVER SCAN: GL attribution ====================
+        gl_attribution AS (
+          SELECT
+            gl.fund_id,
+            gl.account_id,
+            ac.account_name,
+            rat.account_type_name,
+            rat.normal_balance,
+            rtt.transaction_type_name,
+            rtt.category,
+            cur.currency_name AS txn_currency,
+            rs.status_name AS txn_status,
+            rac.approval_tier_name,
+            SUM(gl.amount_usd) AS total_gl_usd,
+            SUM(CASE WHEN rat.account_type_code = 'REVENUE' THEN gl.amount_usd ELSE 0 END) AS revenue_usd,
+            SUM(CASE WHEN rat.account_type_code = 'EXPENSE' THEN gl.amount_usd ELSE 0 END) AS expense_usd,
+            SUM(CASE WHEN rat.account_type_code IN ('REVENUE','EXPENSE') THEN gl.amount_usd ELSE 0 END) AS noi_usd,
+            COUNT(*) AS txn_count
+          FROM juniper_square_demo_catalog.pipeline.fact_gl_transaction gl
+          JOIN juniper_square_demo_catalog.pipeline.dim_account_chart ac ON gl.account_id = ac.account_id
+          JOIN juniper_square_demo_catalog.pipeline.ref_account_type rat ON ac.account_type_code = rat.account_type_code
+          JOIN juniper_square_demo_catalog.pipeline.ref_transaction_type rtt ON gl.transaction_type_code = rtt.transaction_type_code
+          JOIN juniper_square_demo_catalog.pipeline.dim_currency cur ON gl.currency_code = cur.currency_code
+          JOIN juniper_square_demo_catalog.pipeline.ref_status_code rs ON gl.status_code = rs.status_code
+          LEFT JOIN juniper_square_demo_catalog.pipeline.ref_approval_chain rac ON gl.approval_chain_code = rac.approval_tier_code
+          LEFT JOIN juniper_square_demo_catalog.pipeline.dim_counterparty cp ON gl.counterparty_id = cp.counterparty_id
+          LEFT JOIN juniper_square_demo_catalog.pipeline.dim_cost_center cc ON gl.cost_center_code = cc.cost_center_code
+          WHERE gl.fund_id = 'FND-000042'
+            AND gl.transaction_date <= DATE('2024-12-31')
+          GROUP BY gl.fund_id, gl.account_id, ac.account_name, rat.account_type_name,
+                   rat.normal_balance, rtt.transaction_type_name, rtt.category,
+                   cur.currency_name, rs.status_name, rac.approval_tier_name
+        ),
+
+        -- ============== AUDIT TRAIL ====================
+        audit_summary AS (
+          SELECT
+            ae.entity_type,
+            ae.event_type,
+            er.role_name,
+            COUNT(*) AS event_count,
+            MIN(ae.event_timestamp) AS first_event,
+            MAX(ae.event_timestamp) AS last_event
+          FROM juniper_square_demo_catalog.pipeline.fact_audit_event ae
+          LEFT JOIN juniper_square_demo_catalog.pipeline.dim_employee_role er ON ae.role_code = er.role_code
+          WHERE ae.event_timestamp <= TIMESTAMP('2024-12-31 23:59:59')
+            AND ae.entity_type IN ('fact_gl_transaction','fact_allocation','fact_valuation','fact_distribution','fact_capital_call','fact_fee_charge')
+          GROUP BY ae.entity_type, ae.event_type, er.role_name
+        ),
+
+        -- ============== DOCUMENT METADATA ====================
+        doc_summary AS (
+          SELECT
+            dm.fund_id,
+            dt.doc_type_name,
+            COUNT(*) AS doc_count,
+            SUM(dm.file_size_bytes) / 1024.0 / 1024.0 AS total_mb,
+            SUM(dm.page_count) AS total_pages
+          FROM juniper_square_demo_catalog.pipeline.fact_document_metadata dm
+          JOIN juniper_square_demo_catalog.pipeline.dim_document_type dt ON dm.doc_type_code = dt.doc_type_code
+          WHERE dm.fund_id = 'FND-000042'
+          GROUP BY dm.fund_id, dt.doc_type_name
+        )
+
+        SELECT
+          fm.fund_id,
+          fm.fund_name,
+          fm.fund_type_name,
+          fm.is_closed_end,
+          fm.vintage_year,
+          fm.market_cycle_phase,
+          fm.peer_cohort_size,
+          fm.holding_strategy_name,
+          fm.risk_profile,
+          fm.invest_strategy_name,
+          fm.typical_hold_years,
+          fm.pref_return_pct,
+          fm.gp_carry_pct,
+          fm.waterfall_type,
+          fm.mgmt_fee_rate,
+          fm.mgmt_fee_basis,
+          fm.committed_capital_usd,
+          fm.inception_date,
+          fm.arena_name,
+          fm.arena_region,
+
+          pu.property_id,
+          pu.property_name,
+          pu.property_type_name,
+          pu.property_subtype_name,
+          pu.property_class_name,
+          pu.quality_rank,
+          pu.country_name AS property_country_name,
+          pu.state_name,
+          pu.msa_name,
+          pu.msa_population,
+          pu.acquisition_date,
+          pu.acquisition_price_usd,
+          pu.square_feet,
+          pu.units,
+
+          ccf.period_id,
+          ccf.contrib_usd,
+          ccf.dist_usd,
+          ccf.fee_usd,
+          ccf.cumulative_contrib_usd,
+          ccf.cumulative_dist_usd,
+
+          vh.period_value_usd,
+          vh.prior_value_usd,
+          vh.period_value_usd - vh.prior_value_usd AS value_change_usd,
+          vh.valuation_method,
+
+          nts.gross_nav,
+          nts.net_nav,
+          nts.nav_per_unit,
+          nts.prior_net_nav,
+          nts.total_units,
+
+          fxn.avg_rate AS fx_avg_rate,
+          fxn.rate_stddev AS fx_volatility,
+
+          fmet.dpi,
+          fmet.tvpi,
+          fmet.rvpi,
+          fmet.irr_proxy AS fund_irr,
+
+          pa.property_pl_usd,
+          pa.realized_pl,
+          pa.unrealized_pl,
+          pa.income_pl,
+          pa.expense_pl,
+
+          pq.cohort_size AS peer_cohort_size_actual,
+          pq.p25_committed AS peer_p25_committed,
+          pq.p50_committed AS peer_p50_committed,
+          pq.p75_committed AS peer_p75_committed,
+          CASE
+            WHEN fm.committed_capital_usd <= pq.p25_committed THEN 'Q1'
+            WHEN fm.committed_capital_usd <= pq.p50_committed THEN 'Q2'
+            WHEN fm.committed_capital_usd <= pq.p75_committed THEN 'Q3'
+            ELSE 'Q4'
+          END AS peer_quartile,
+
+          ga.account_name,
+          ga.account_type_name,
+          ga.transaction_type_name,
+          ga.category AS gl_category,
+          ga.txn_currency,
+          ga.txn_status,
+          ga.approval_tier_name AS gl_approval_tier,
+          ga.total_gl_usd,
+          ga.revenue_usd AS gl_revenue,
+          ga.expense_usd AS gl_expense,
+          ga.noi_usd AS gl_noi,
+          ga.txn_count AS gl_txn_count,
+
+          audit.entity_type AS audit_entity_type,
+          audit.event_type AS audit_event_type,
+          audit.role_name AS audit_user_role,
+          audit.event_count AS audit_event_count,
+
+          ds.doc_type_name,
+          ds.doc_count,
+          ds.total_mb AS doc_total_mb,
+          ds.total_pages AS doc_total_pages
+
+        FROM fund_metadata fm
+        LEFT JOIN property_universe pu ON pu.arena_id = fm.arena_id
+        LEFT JOIN cumulative_cash_flows ccf ON ccf.fund_id = fm.fund_id
+        LEFT JOIN valuation_history vh ON vh.fund_id = fm.fund_id AND vh.property_id = pu.property_id
+        LEFT JOIN nav_time_series nts ON nts.fund_id = fm.fund_id AND nts.period_id = ccf.period_id
+        LEFT JOIN fx_normalized fxn ON fxn.base_currency = fm.base_currency
+        LEFT JOIN fund_metrics fmet ON fmet.fund_id = fm.fund_id AND fmet.period_id = ccf.period_id
+        LEFT JOIN property_attribution pa ON pa.fund_id = fm.fund_id AND pa.property_id = pu.property_id AND pa.period_id = ccf.period_id
+        LEFT JOIN peer_quartile pq ON pq.vintage_year = fm.vintage_year
+        LEFT JOIN gl_attribution ga ON ga.fund_id = fm.fund_id
+        LEFT JOIN audit_summary audit ON 1=1
+        LEFT JOIN doc_summary ds ON ds.fund_id = fm.fund_id
+        ORDER BY fm.fund_id, pu.property_id, ccf.period_id;
+
+  - name: "q8a_refactored"
+    weight: 1
+    enabled: true
+    targets: [dbsql]
+    sql_dbsql: |
+        -- =============================================================================
+        -- Q8a-refactored: PCAP statement via medallion (sub-second on gold)
+        -- =============================================================================
+        -- Same business answer as Q8a-shape, 30 lines, reads from pre-aggregated
+        -- gold_investor_pcap (computed by SDP). All waterfall math, FX adjustment, tax
+        -- withholding, period IRR/MOIC/TVPI already precomputed at PCAP grain.
+        -- =============================================================================
+
+        -- ---- DBSQL (Spark SQL) ----
+
+        SELECT
+          ip.investor_name,
+          ip.investor_type_name,
+          fu.fund_name,
+          fu.vintage_year,
+          fu.fund_type_name,
+          p.period_label,
+          wt.tier_name AS waterfall_tier,
+          pcap.opening_balance_usd,
+          pcap.contributions_usd,
+          pcap.distributions_roc,
+          pcap.distributions_pref,
+          pcap.distributions_catchup,
+          pcap.distributions_carry,
+          pcap.allocations_realized,
+          pcap.allocations_unrealized,
+          pcap.allocations_income,
+          pcap.allocations_expense,
+          pcap.fees_total,
+          pcap.fx_adjustment_usd,
+          pcap.tax_withholding_usd,
+          pcap.closing_balance_usd,
+          pcap.period_dpi,
+          pcap.period_moic,
+          pcap.period_tvpi
+        FROM juniper_square_demo_catalog.pipeline.gold_investor_pcap pcap
+        JOIN juniper_square_demo_catalog.pipeline.dim_investor ip
+          ON pcap.investor_id = ip.investor_id AND ip.is_current = TRUE
+        JOIN juniper_square_demo_catalog.pipeline.dim_investor_type it
+          ON ip.investor_type_code = it.investor_type_code
+        JOIN juniper_square_demo_catalog.pipeline.dim_fund fu
+          ON pcap.fund_id = fu.fund_id AND fu.is_current = TRUE
+        JOIN juniper_square_demo_catalog.pipeline.dim_fund_type ft
+          ON fu.fund_type_code = ft.fund_type_code
+        JOIN juniper_square_demo_catalog.pipeline.dim_period p
+          ON pcap.period_id = p.period_id
+        JOIN juniper_square_demo_catalog.pipeline.dim_waterfall_tier wt
+          ON pcap.waterfall_tier_id = wt.tier_id
+        WHERE pcap.investor_id = 'INV-0000042'
+          AND p.period_start >= DATE('2024-01-01')
+          AND p.period_end <= DATE('2024-03-31')
+        ORDER BY fu.fund_id, p.period_id, wt.tier_order;
+
+  - name: "q8b_refactored"
+    weight: 1
+    enabled: true
+    targets: [dbsql]
+    sql_dbsql: |
+        -- =============================================================================
+        -- Q8b-refactored: Fund performance via medallion (sub-second on gold)
+        -- =============================================================================
+        -- Same business answer as Q8b-shape, 25 lines, reads from pre-aggregated
+        -- gold_fund_attribution_period. All cash flows, valuations, NAV, IRR, MOIC,
+        -- TVPI, DPI, property attribution, peer benchmarks already precomputed.
+        -- =============================================================================
+
+        -- ---- DBSQL (Spark SQL) ----
+
+        SELECT
+          f.fund_name,
+          f.vintage_year,
+          ft.fund_type_name,
+          rhs.strategy_name AS holding_strategy_name,
+          pu.property_name,
+          pt.property_type_name,
+          pu.msa_code,
+          fap.period_label,
+          fap.fund_irr_net,
+          fap.fund_irr_trailing_12m,
+          fap.moic_net,
+          fap.tvpi_net,
+          fap.dpi_net,
+          fap.rvpi_net,
+          fap.property_contribution_pct,
+          fap.property_attribution_usd,
+          fap.peer_quartile_irr,
+          fap.peer_quartile_moic,
+          fap.vintage_cohort_median_irr,
+          fap.gross_appreciation_usd,
+          fap.fx_drag_usd,
+          fap.gross_nav,
+          fap.net_nav
+        FROM juniper_square_demo_catalog.pipeline.gold_fund_attribution_period fap
+        JOIN juniper_square_demo_catalog.pipeline.dim_fund f ON fap.fund_id = f.fund_id AND f.is_current = TRUE
+        JOIN juniper_square_demo_catalog.pipeline.dim_fund_type ft ON f.fund_type_code = ft.fund_type_code
+        LEFT JOIN juniper_square_demo_catalog.pipeline.ref_holding_strategy rhs ON f.holding_strategy_code = rhs.strategy_code
+        JOIN juniper_square_demo_catalog.pipeline.dim_property pu ON fap.property_id = pu.property_id
+        JOIN juniper_square_demo_catalog.pipeline.dim_property_type pt ON pu.property_type_code = pt.property_type_code
+        WHERE fap.fund_id = 'FND-000042'
+          AND fap.period_end <= DATE('2024-12-31')
+        ORDER BY fap.period_id, pu.property_id;
+
+  - name: "q8_shape"
+    weight: 1
+    enabled: true
+    targets: [dbsql]
+    sql_dbsql: |
+        -- =============================================================================
+        -- Q8b-shape: Fund Performance Roll-up (silver-scan monster)
+        -- =============================================================================
+        -- Replicates Juniper's described shape: 500 lines, 50-table touch count.
+        -- Real-world: Fund-level IRR/MOIC/TVPI/DPI over time, by property, with
+        -- peer-vintage benchmarking. Quarterly board pack. Used by Insights AI for
+        -- "show me how Fund VII is performing vs vintage peers."
+        --
+        -- Parameters:
+        --   :fund_id      '{fund_id}' (or NULL = all funds in arena)
+        --   :as_of_date   '2024-12-31'
+        -- =============================================================================
+        
+        -- ---- DBSQL (Spark SQL) ----
+        
+        WITH
+        fund_metadata AS (
+          SELECT
+            f.fund_id,
+            f.arena_id,
+            f.fund_name,
+            f.fund_type_code,
+            ft.fund_type_name,
+            ft.is_closed_end,
+            f.vintage_year,
+            vy.market_cycle_phase,
+            vy.peer_cohort_size,
+            f.holding_strategy_code,
+            hs.strategy_name AS holding_strategy_name,
+            hs.risk_profile,
+            f.invest_strategy_code,
+            invst.invest_strategy_name,
+            invst.typical_hold_years,
+            f.carry_code,
+            cs.pref_return_pct,
+            cs.gp_carry_pct,
+            cs.catchup_pct,
+            cs.waterfall_type,
+            f.mgmt_fee_code,
+            mfs.rate_pct AS mgmt_fee_rate,
+            mfs.rate_basis AS mgmt_fee_basis,
+            f.base_currency,
+            cur.currency_name,
+            f.committed_capital_usd,
+            f.inception_date,
+            a.arena_name,
+            a.region AS arena_region
+          FROM juniper_square_demo_catalog.pipeline.dim_fund f
+          JOIN juniper_square_demo_catalog.pipeline.dim_fund_type ft ON f.fund_type_code = ft.fund_type_code
+          JOIN juniper_square_demo_catalog.pipeline.dim_vintage_year vy ON f.vintage_year = vy.vintage_year
+          JOIN juniper_square_demo_catalog.pipeline.dim_arena a ON f.arena_id = a.arena_id
+          LEFT JOIN juniper_square_demo_catalog.pipeline.ref_holding_strategy hs ON f.holding_strategy_code = hs.strategy_code
+          LEFT JOIN juniper_square_demo_catalog.pipeline.ref_investment_strategy invst ON f.invest_strategy_code = invst.invest_strategy_code
+          LEFT JOIN juniper_square_demo_catalog.pipeline.ref_carry_structure cs ON f.carry_code = cs.carry_code
+          LEFT JOIN juniper_square_demo_catalog.pipeline.ref_mgmt_fee_schedule mfs ON f.mgmt_fee_code = mfs.schedule_code
+          JOIN juniper_square_demo_catalog.pipeline.dim_currency cur ON f.base_currency = cur.currency_code
+          WHERE f.fund_id = '{fund_id}'
+            AND f.is_current = TRUE
+        ),
+        
+        property_universe AS (
+          SELECT
+            p.property_id,
+            p.arena_id,
+            p.property_name,
+            p.property_type_code,
+            pt.property_type_name,
+            p.property_subtype_code,
+            pst.property_subtype_name,
+            p.property_class_code,
+            pcl.class_name AS property_class_name,
+            pcl.quality_rank,
+            p.country_code,
+            geo_c.country_name AS property_country_name,
+            geo_c.region AS property_region,
+            p.state_code,
+            geo_s.state_name,
+            p.msa_code,
+            msa.msa_name,
+            msa.population AS msa_population,
+            p.acquisition_date,
+            p.acquisition_price_usd,
+            p.square_feet,
+            p.units
+          FROM juniper_square_demo_catalog.pipeline.dim_property p
+          JOIN juniper_square_demo_catalog.pipeline.dim_property_type pt ON p.property_type_code = pt.property_type_code
+          LEFT JOIN juniper_square_demo_catalog.pipeline.dim_property_subtype pst ON p.property_subtype_code = pst.property_subtype_code
+          LEFT JOIN juniper_square_demo_catalog.pipeline.ref_property_class pcl ON p.property_class_code = pcl.class_code
+          JOIN juniper_square_demo_catalog.pipeline.dim_geography_country geo_c ON p.country_code = geo_c.country_code
+          LEFT JOIN juniper_square_demo_catalog.pipeline.dim_geography_state geo_s ON p.state_code = geo_s.state_code
+          LEFT JOIN juniper_square_demo_catalog.pipeline.dim_geography_msa msa ON p.msa_code = msa.msa_code
+        ),
+        
+        cash_flow_history AS (
+          SELECT fund_id,
+            CONCAT('FY', YEAR(call_date), '_Q', QUARTER(call_date)) AS period_id,
+            'CONTRIBUTION' AS flow_type,
+            SUM(call_amount_usd) AS flow_usd
+            FROM juniper_square_demo_catalog.pipeline.fact_capital_call
+            WHERE fund_id = '{fund_id}' AND call_date <= DATE('2024-12-31')
+            GROUP BY fund_id, CONCAT('FY', YEAR(call_date), '_Q', QUARTER(call_date))
+          UNION ALL
+          SELECT fund_id,
+            CONCAT('FY', YEAR(distribution_date), '_Q', QUARTER(distribution_date)) AS period_id,
+            CONCAT('DISTRIBUTION_', waterfall_tier_id) AS flow_type,
+            SUM(amount_usd) AS flow_usd
+            FROM juniper_square_demo_catalog.pipeline.fact_distribution
+            WHERE fund_id = '{fund_id}' AND distribution_date <= DATE('2024-12-31')
+            GROUP BY fund_id, period_id, waterfall_tier_id
+          UNION ALL
+          SELECT fund_id, period_id, 'FEE' AS flow_type, SUM(amount_usd) AS flow_usd
+            FROM juniper_square_demo_catalog.pipeline.fact_fee_charge
+            WHERE fund_id = '{fund_id}' AND charge_date <= DATE('2024-12-31')
+            GROUP BY fund_id, period_id
+        ),
+        
+        valuation_history AS (
+          SELECT
+            v.fund_id,
+            v.property_id,
+            v.period_id,
+            AVG(v.value_usd) AS period_value_usd,
+            MAX(v.valuation_date) AS latest_val_date,
+            v.valuation_method,
+            LAG(AVG(v.value_usd)) OVER (PARTITION BY v.property_id ORDER BY v.period_id) AS prior_value_usd
+          FROM juniper_square_demo_catalog.pipeline.fact_valuation v
+          WHERE v.fund_id = '{fund_id}' AND v.valuation_date <= DATE('2024-12-31')
+          GROUP BY v.fund_id, v.property_id, v.period_id, v.valuation_method
+        ),
+        
+        nav_time_series AS (
+          SELECT
+            fund_id,
+            period_id,
+            AVG(gross_nav_usd) AS gross_nav,
+            AVG(net_nav_usd) AS net_nav,
+            AVG(nav_per_unit) AS nav_per_unit,
+            SUM(total_units) AS total_units,
+            LAG(AVG(net_nav_usd)) OVER (PARTITION BY fund_id ORDER BY period_id) AS prior_net_nav
+          FROM juniper_square_demo_catalog.pipeline.fact_nav_snapshot
+          WHERE fund_id = '{fund_id}' AND snapshot_date <= DATE('2024-12-31')
+          GROUP BY fund_id, period_id
+        ),
+        
+        fx_normalized AS (
+          SELECT
+            fx.base_currency,
+            fx.quote_currency,
+            rcp.is_active,
+            AVG(fx.rate) AS avg_rate,
+            STDDEV(fx.rate) AS rate_stddev
+          FROM juniper_square_demo_catalog.pipeline.fact_fx_rate fx
+          JOIN juniper_square_demo_catalog.pipeline.ref_currency_pair rcp ON fx.pair_code = rcp.pair_code
+          WHERE fx.rate_date <= DATE('2024-12-31')
+          GROUP BY fx.base_currency, fx.quote_currency, rcp.is_active
+        ),
+        
+        cumulative_cash_flows AS (
+          SELECT
+            fund_id,
+            period_id,
+            SUM(CASE WHEN flow_type = 'CONTRIBUTION' THEN flow_usd ELSE 0 END) AS contrib_usd,
+            SUM(CASE WHEN flow_type LIKE 'DISTRIBUTION%' THEN flow_usd ELSE 0 END) AS dist_usd,
+            SUM(CASE WHEN flow_type = 'FEE' THEN flow_usd ELSE 0 END) AS fee_usd,
+            SUM(SUM(CASE WHEN flow_type LIKE 'DISTRIBUTION%' THEN flow_usd ELSE 0 END)) OVER (
+              PARTITION BY fund_id ORDER BY period_id
+            ) AS cumulative_dist_usd,
+            SUM(SUM(CASE WHEN flow_type = 'CONTRIBUTION' THEN flow_usd ELSE 0 END)) OVER (
+              PARTITION BY fund_id ORDER BY period_id
+            ) AS cumulative_contrib_usd
+          FROM cash_flow_history
+          GROUP BY fund_id, period_id
+        ),
+        
+        fund_metrics AS (
+          SELECT
+            ccf.fund_id,
+            ccf.period_id,
+            ccf.cumulative_contrib_usd,
+            ccf.cumulative_dist_usd,
+            nts.net_nav,
+            ccf.cumulative_dist_usd / NULLIF(ccf.cumulative_contrib_usd, 0) AS dpi,
+            (ccf.cumulative_dist_usd + nts.net_nav) / NULLIF(ccf.cumulative_contrib_usd, 0) AS tvpi,
+            nts.net_nav / NULLIF(ccf.cumulative_contrib_usd, 0) AS rvpi,
+            -- crude IRR proxy via linear approximation
+            POWER((ccf.cumulative_dist_usd + nts.net_nav) / NULLIF(ccf.cumulative_contrib_usd, 1), 0.25) - 1 AS irr_proxy
+          FROM cumulative_cash_flows ccf
+          LEFT JOIN nav_time_series nts ON ccf.fund_id = nts.fund_id AND ccf.period_id = nts.period_id
+        ),
+        
+        property_attribution AS (
+          SELECT
+            a.fund_id,
+            a.property_id,
+            a.period_id,
+            SUM(a.allocated_amount_usd) AS property_pl_usd,
+            SUM(CASE WHEN a.allocation_type = 'REALIZED_GAIN' THEN a.allocated_amount_usd ELSE 0 END) AS realized_pl,
+            SUM(CASE WHEN a.allocation_type = 'UNREALIZED_GAIN' THEN a.allocated_amount_usd ELSE 0 END) AS unrealized_pl,
+            SUM(CASE WHEN a.allocation_type = 'INCOME' THEN a.allocated_amount_usd ELSE 0 END) AS income_pl,
+            SUM(CASE WHEN a.allocation_type = 'EXPENSE' THEN a.allocated_amount_usd ELSE 0 END) AS expense_pl
+          FROM juniper_square_demo_catalog.pipeline.fact_allocation a
+          JOIN juniper_square_demo_catalog.pipeline.dim_account_chart ac ON a.account_id = ac.account_id
+          JOIN juniper_square_demo_catalog.pipeline.ref_account_type rat ON ac.account_type_code = rat.account_type_code
+          WHERE a.fund_id = '{fund_id}'
+            AND a.computed_at <= TIMESTAMP('2024-12-31 23:59:59')
+          GROUP BY a.fund_id, a.property_id, a.period_id
+        ),
+        
+        peer_quartile AS (
+          SELECT
+            vy.vintage_year,
+            COUNT(DISTINCT f.fund_id) AS cohort_size,
+            PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY f.committed_capital_usd) AS p25_committed,
+            PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY f.committed_capital_usd) AS p50_committed,
+            PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY f.committed_capital_usd) AS p75_committed
+          FROM juniper_square_demo_catalog.pipeline.dim_fund f
+          JOIN juniper_square_demo_catalog.pipeline.dim_vintage_year vy ON f.vintage_year = vy.vintage_year
+          WHERE f.is_current = TRUE
+            AND f.vintage_year IN (SELECT vintage_year FROM fund_metadata)
+          GROUP BY vy.vintage_year
+        ),
+        
+        -- ============== HEAVY SILVER SCAN: GL attribution ====================
+        gl_attribution AS (
+          SELECT
+            gl.fund_id,
+            gl.account_id,
+            ac.account_name,
+            rat.account_type_name,
+            rat.normal_balance,
+            rtt.transaction_type_name,
+            rtt.category,
+            cur.currency_name AS txn_currency,
+            rs.status_name AS txn_status,
+            rac.approval_tier_name,
+            SUM(gl.amount_usd) AS total_gl_usd,
+            SUM(CASE WHEN rat.account_type_code = 'REVENUE' THEN gl.amount_usd ELSE 0 END) AS revenue_usd,
+            SUM(CASE WHEN rat.account_type_code = 'EXPENSE' THEN gl.amount_usd ELSE 0 END) AS expense_usd,
+            SUM(CASE WHEN rat.account_type_code IN ('REVENUE','EXPENSE') THEN gl.amount_usd ELSE 0 END) AS noi_usd,
+            COUNT(*) AS txn_count
+          FROM juniper_square_demo_catalog.pipeline.fact_gl_transaction gl
+          JOIN juniper_square_demo_catalog.pipeline.dim_account_chart ac ON gl.account_id = ac.account_id
+          JOIN juniper_square_demo_catalog.pipeline.ref_account_type rat ON ac.account_type_code = rat.account_type_code
+          JOIN juniper_square_demo_catalog.pipeline.ref_transaction_type rtt ON gl.transaction_type_code = rtt.transaction_type_code
+          JOIN juniper_square_demo_catalog.pipeline.dim_currency cur ON gl.currency_code = cur.currency_code
+          JOIN juniper_square_demo_catalog.pipeline.ref_status_code rs ON gl.status_code = rs.status_code
+          LEFT JOIN juniper_square_demo_catalog.pipeline.ref_approval_chain rac ON gl.approval_chain_code = rac.approval_tier_code
+          LEFT JOIN juniper_square_demo_catalog.pipeline.dim_counterparty cp ON gl.counterparty_id = cp.counterparty_id
+          LEFT JOIN juniper_square_demo_catalog.pipeline.dim_cost_center cc ON gl.cost_center_code = cc.cost_center_code
+          WHERE gl.fund_id = '{fund_id}'
+            AND gl.transaction_date <= DATE('2024-12-31')
+          GROUP BY gl.fund_id, gl.account_id, ac.account_name, rat.account_type_name,
+                   rat.normal_balance, rtt.transaction_type_name, rtt.category,
+                   cur.currency_name, rs.status_name, rac.approval_tier_name
+        ),
+        
+        -- ============== AUDIT TRAIL ====================
+        audit_summary AS (
+          SELECT
+            ae.entity_type,
+            ae.event_type,
+            er.role_name,
+            COUNT(*) AS event_count,
+            MIN(ae.event_timestamp) AS first_event,
+            MAX(ae.event_timestamp) AS last_event
+          FROM juniper_square_demo_catalog.pipeline.fact_audit_event ae
+          LEFT JOIN juniper_square_demo_catalog.pipeline.dim_employee_role er ON ae.role_code = er.role_code
+          WHERE ae.event_timestamp <= TIMESTAMP('2024-12-31 23:59:59')
+            AND ae.entity_type IN ('fact_gl_transaction','fact_allocation','fact_valuation','fact_distribution','fact_capital_call','fact_fee_charge')
+          GROUP BY ae.entity_type, ae.event_type, er.role_name
+        ),
+        
+        -- ============== DOCUMENT METADATA ====================
+        doc_summary AS (
+          SELECT
+            dm.fund_id,
+            dt.doc_type_name,
+            COUNT(*) AS doc_count,
+            SUM(dm.file_size_bytes) / 1024.0 / 1024.0 AS total_mb,
+            SUM(dm.page_count) AS total_pages
+          FROM juniper_square_demo_catalog.pipeline.fact_document_metadata dm
+          JOIN juniper_square_demo_catalog.pipeline.dim_document_type dt ON dm.doc_type_code = dt.doc_type_code
+          WHERE dm.fund_id = '{fund_id}'
+          GROUP BY dm.fund_id, dt.doc_type_name
+        )
+        
+        SELECT
+          fm.fund_id,
+          fm.fund_name,
+          fm.fund_type_name,
+          fm.is_closed_end,
+          fm.vintage_year,
+          fm.market_cycle_phase,
+          fm.peer_cohort_size,
+          fm.holding_strategy_name,
+          fm.risk_profile,
+          fm.invest_strategy_name,
+          fm.typical_hold_years,
+          fm.pref_return_pct,
+          fm.gp_carry_pct,
+          fm.waterfall_type,
+          fm.mgmt_fee_rate,
+          fm.mgmt_fee_basis,
+          fm.committed_capital_usd,
+          fm.inception_date,
+          fm.arena_name,
+          fm.arena_region,
+        
+          pu.property_id,
+          pu.property_name,
+          pu.property_type_name,
+          pu.property_subtype_name,
+          pu.property_class_name,
+          pu.quality_rank,
+          pu.property_country_name,
+          pu.state_name,
+          pu.msa_name,
+          pu.msa_population,
+          pu.acquisition_date,
+          pu.acquisition_price_usd,
+          pu.square_feet,
+          pu.units,
+        
+          ccf.period_id,
+          ccf.contrib_usd,
+          ccf.dist_usd,
+          ccf.fee_usd,
+          ccf.cumulative_contrib_usd,
+          ccf.cumulative_dist_usd,
+        
+          vh.period_value_usd,
+          vh.prior_value_usd,
+          vh.period_value_usd - vh.prior_value_usd AS value_change_usd,
+          vh.valuation_method,
+        
+          nts.gross_nav,
+          nts.net_nav,
+          nts.nav_per_unit,
+          nts.prior_net_nav,
+          nts.total_units,
+        
+          fxn.avg_rate AS fx_avg_rate,
+          fxn.rate_stddev AS fx_volatility,
+        
+          fmet.dpi,
+          fmet.tvpi,
+          fmet.rvpi,
+          fmet.irr_proxy AS fund_irr,
+        
+          pa.property_pl_usd,
+          pa.realized_pl,
+          pa.unrealized_pl,
+          pa.income_pl,
+          pa.expense_pl,
+        
+          pq.cohort_size AS peer_cohort_size_actual,
+          pq.p25_committed AS peer_p25_committed,
+          pq.p50_committed AS peer_p50_committed,
+          pq.p75_committed AS peer_p75_committed,
+          CASE
+            WHEN fm.committed_capital_usd <= pq.p25_committed THEN 'Q1'
+            WHEN fm.committed_capital_usd <= pq.p50_committed THEN 'Q2'
+            WHEN fm.committed_capital_usd <= pq.p75_committed THEN 'Q3'
+            ELSE 'Q4'
+          END AS peer_quartile,
+        
+          ga.account_name,
+          ga.account_type_name,
+          ga.transaction_type_name,
+          ga.category AS gl_category,
+          ga.txn_currency,
+          ga.txn_status,
+          ga.approval_tier_name AS gl_approval_tier,
+          ga.total_gl_usd,
+          ga.revenue_usd AS gl_revenue,
+          ga.expense_usd AS gl_expense,
+          ga.noi_usd AS gl_noi,
+          ga.txn_count AS gl_txn_count,
+        
+          audit.entity_type AS audit_entity_type,
+          audit.event_type AS audit_event_type,
+          audit.role_name AS audit_user_role,
+          audit.event_count AS audit_event_count,
+        
+          ds.doc_type_name,
+          ds.doc_count,
+          ds.total_mb AS doc_total_mb,
+          ds.total_pages AS doc_total_pages
+        
+        FROM fund_metadata fm
+        LEFT JOIN property_universe pu ON pu.arena_id = fm.arena_id
+        LEFT JOIN cumulative_cash_flows ccf ON ccf.fund_id = fm.fund_id
+        LEFT JOIN valuation_history vh ON vh.fund_id = fm.fund_id AND vh.property_id = pu.property_id
+        LEFT JOIN nav_time_series nts ON nts.fund_id = fm.fund_id AND nts.period_id = ccf.period_id
+        LEFT JOIN fx_normalized fxn ON fxn.base_currency = fm.base_currency
+        LEFT JOIN fund_metrics fmet ON fmet.fund_id = fm.fund_id AND fmet.period_id = ccf.period_id
+        LEFT JOIN property_attribution pa ON pa.fund_id = fm.fund_id AND pa.property_id = pu.property_id AND pa.period_id = ccf.period_id
+        LEFT JOIN peer_quartile pq ON pq.vintage_year = fm.vintage_year
+        LEFT JOIN gl_attribution ga ON ga.fund_id = fm.fund_id
+        LEFT JOIN (
+          SELECT entity_type, event_type, role_name, event_count, first_event, last_event,
+            ROW_NUMBER() OVER (ORDER BY event_count DESC) AS rn
+          FROM audit_summary
+        ) audit ON audit.rn = 1
+        LEFT JOIN doc_summary ds ON ds.fund_id = fm.fund_id
+        ORDER BY fm.fund_id, pu.property_id, ccf.period_id
+        LIMIT 100000;
+
+  - name: "q8_refactored"
+    weight: 1
+    enabled: true
+    targets: [dbsql]
+    sql_dbsql: |
+        -- =============================================================================
+        -- Q8b-refactored: Fund performance via medallion (sub-second on gold)
+        -- =============================================================================
+        -- Same business answer as Q8b-shape, 25 lines, reads from pre-aggregated
+        -- gold_fund_attribution_period. All cash flows, valuations, NAV, IRR, MOIC,
+        -- TVPI, DPI, property attribution, peer benchmarks already precomputed.
+        -- =============================================================================
+        
+        -- ---- DBSQL (Spark SQL) ----
+        
+        SELECT
+          f.fund_name,
+          f.vintage_year,
+          ft.fund_type_name,
+          rhs.strategy_name AS holding_strategy_name,
+          pu.property_name,
+          pt.property_type_name,
+          pu.msa_code,
+          fap.period_label,
+          fap.fund_irr_net,
+          fap.fund_irr_trailing_12m,
+          fap.moic_net,
+          fap.tvpi_net,
+          fap.dpi_net,
+          fap.rvpi_net,
+          fap.property_contribution_pct,
+          fap.property_attribution_usd,
+          fap.peer_quartile_irr,
+          fap.peer_quartile_moic,
+          fap.vintage_cohort_median_irr,
+          fap.gross_appreciation_usd,
+          fap.fx_drag_usd,
+          fap.gross_nav,
+          fap.net_nav
+        FROM juniper_square_demo_catalog.pipeline.gold_fund_attribution_period fap
+        JOIN juniper_square_demo_catalog.pipeline.dim_fund f ON fap.fund_id = f.fund_id AND f.is_current = TRUE
+        JOIN juniper_square_demo_catalog.pipeline.dim_fund_type ft ON f.fund_type_code = ft.fund_type_code
+        LEFT JOIN juniper_square_demo_catalog.pipeline.ref_holding_strategy rhs ON f.holding_strategy_code = rhs.strategy_code
+        JOIN juniper_square_demo_catalog.pipeline.dim_property pu ON fap.property_id = pu.property_id
+        JOIN juniper_square_demo_catalog.pipeline.dim_property_type pt ON pu.property_type_code = pt.property_type_code
+        WHERE fap.fund_id = '{fund_id}'
+          AND fap.period_end <= DATE('2024-12-31')
+        ORDER BY fap.period_id, pu.property_id;
+

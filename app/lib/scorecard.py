@@ -52,8 +52,8 @@ PILLARS: List[Pillar] = [
         },
         databricks_stage="Scale",
         proof_point=(
-            "Lakebase + DBSQL deliver sub-second p95 reads against live "
-            "Postgres, with micro-batch ingest measured in minutes."
+            "Medallion architecture turns the 500-line fund roll-up into a "
+            "25-line gold SELECT (22× faster), with micro-batch ingest in minutes."
         ),
         path_to_mature_title="Path to Mature",
         path_to_mature=(
@@ -83,7 +83,7 @@ PILLARS: List[Pillar] = [
         path_to_mature=(
             "Predictive Optimization auto-tunes VACUUM and clustering; system.lakeflow.* "
             "system tables plus Databricks Alerts catch drift before a pager fires. "
-            "This demo already runs serverless across SDP, DBSQL, and Lakebase."
+            "This demo already runs serverless across SDP and DBSQL."
         ),
         has_live_drill_in=True,
         drill_page="klo",
@@ -179,8 +179,8 @@ PILLARS: List[Pillar] = [
         path_to_mature_title="Path to Mature",
         path_to_mature=(
             "Predictive Optimization plus Liquid Clustering auto-tune storage layout; "
-            "Photon reduces CPU cost 3-5x on typical SQL. Serverless SKUs across SDP, "
-            "DBSQL, and Lakebase - already in this demo - are the Mature-tier compute model."
+            "Photon reduces CPU cost 3-5x on typical SQL. Serverless SKUs across SDP "
+            "and DBSQL - already in this demo - are the Mature-tier compute model."
         ),
         has_live_drill_in=True,
         drill_page="cost",

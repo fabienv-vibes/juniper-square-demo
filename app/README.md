@@ -1,8 +1,7 @@
 # Juniper Square × Databricks Benchmark App
 
-Streamlit-on-Databricks-Apps scorecard app for the Shaz Khan meeting.
-
-Frames Databricks benchmark results inside Juniper's 7-pillar data-maturity scorecard:
+Streamlit-on-Databricks-Apps scorecard app that frames Databricks benchmark results inside
+Juniper Square's 7-pillar data-maturity scorecard:
 **Data Latency · Keeping the Lights On · Data Lineage · Data Provenance · Data Security · Cost · Auditability**.
 
 ## Layout
@@ -15,8 +14,8 @@ juniper-benchmark-app/
 ├── lib/
 │   ├── scorecard.py    # 7-pillar definitions, stages, colors
 │   ├── queries.py      # SQL against juniper_square_demo_catalog.pipeline + system.*
-│   ├── charts.py       # Plotly builders (radar, latency, throughput, cost)
-│   └── lineage.py      # UC lineage API stubs
+│   ├── charts.py       # Plotly builders (latency, throughput, cost)
+│   └── lineage.py      # UC lineage API helpers
 └── mock_data/          # CSV fallbacks used when Delta tables are empty
 ```
 
