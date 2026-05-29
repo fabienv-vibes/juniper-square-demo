@@ -93,6 +93,14 @@ BRAND_CSS = """
     -moz-osx-font-smoothing: grayscale;
   }
 
+  /* Material Symbols icons (sidebar collapse, dropdown chevrons, etc.) must
+     keep their icon font; the global rule above clobbers them otherwise and
+     they render as literal text like "keyboard_double_arrow_left". */
+  [data-testid="stIconMaterial"],
+  span[data-testid="stIconMaterial"] {
+    font-family: "Material Symbols Rounded" !important;
+  }
+
   /* ----------------------------------------------------------------------
      App shell — Light theme
      ---------------------------------------------------------------------- */
