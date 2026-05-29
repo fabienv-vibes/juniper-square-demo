@@ -1,0 +1,3 @@
+query_name,target,p50_ms,p95_ms,p99_ms,mean_ms,successful,failed,target_rate_qps,mode,started_at
+q8_refactored,dbsql,729.0,977.0,1419.0,754.496,248,0,10.0,sustained,2026-05-27 21:16:10.789000+00:00
+q8_shape,dbsql,10618.0,21777.0,38241.0,12480.4667,180,0,1.0,sustained,2026-05-27 19:29:30.126000+00:00

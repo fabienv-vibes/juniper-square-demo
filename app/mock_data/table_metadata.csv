@@ -1,11 +1,11 @@
 table_name,table_type,data_source_format,table_owner,created,comment,last_altered
-gold_arena_overview,MATERIALIZED_VIEW,DELTA,fabien.vaucheret@databricks.com,2026-04-16T18:00:00Z,One row per arena with fund + property rollups,2026-04-24T09:16:12Z
-gold_fund_performance,MATERIALIZED_VIEW,DELTA,fabien.vaucheret@databricks.com,2026-04-16T18:00:00Z,Fund-level AUM and performance rollup,2026-04-24T09:16:28Z
-gold_gl_monthly_summary,MATERIALIZED_VIEW,DELTA,fabien.vaucheret@databricks.com,2026-04-16T18:00:00Z,Monthly category rollups from silver GL,2026-04-24T09:17:54Z
-gold_property_financials,MATERIALIZED_VIEW,DELTA,fabien.vaucheret@databricks.com,2026-04-16T18:00:00Z,Monthly property P&L,2026-04-24T09:17:18Z
-silver_gl_transactions,MATERIALIZED_VIEW,DELTA,fabien.vaucheret@databricks.com,2026-04-16T18:00:00Z,Cleaned GL fact with liquid clustering,2026-04-24T09:15:47Z
-bronze_arenas,STREAMING_TABLE,DELTA,fabien.vaucheret@databricks.com,2026-04-16T18:00:00Z,Raw arena ingest,2026-04-24T09:12:03Z
-bronze_gl_transactions,STREAMING_TABLE,DELTA,fabien.vaucheret@databricks.com,2026-04-16T18:00:00Z,Raw GL ingest from Auto Loader,2026-04-24T09:12:47Z
-silver_investors,STREAMING_TABLE,DELTA,fabien.vaucheret@databricks.com,2026-04-16T18:00:00Z,Cleaned investor dimension,2026-04-24T09:14:11Z
-benchmark_summary,MANAGED,DELTA,fabien.vaucheret@databricks.com,2026-04-23T20:43:58Z,Benchmark p50/p95/p99 per target+concurrency+query,2026-04-23T21:21:01Z
-benchmark_raw,MANAGED,DELTA,fabien.vaucheret@databricks.com,2026-04-23T20:43:58Z,Per-query latency samples,2026-04-23T21:21:01Z
+gold_arena_overview,MATERIALIZED_VIEW,DELTA,demo.owner@juniper-square-demo.com,2026-04-16T18:00:00Z,One row per arena with fund + property rollups,2026-04-24T09:16:12Z
+gold_fund_performance,MATERIALIZED_VIEW,DELTA,demo.owner@juniper-square-demo.com,2026-04-16T18:00:00Z,Fund-level AUM and performance rollup,2026-04-24T09:16:28Z
+gold_gl_monthly_summary,MATERIALIZED_VIEW,DELTA,demo.owner@juniper-square-demo.com,2026-04-16T18:00:00Z,Monthly category rollups from silver GL,2026-04-24T09:17:54Z
+gold_property_financials,MATERIALIZED_VIEW,DELTA,demo.owner@juniper-square-demo.com,2026-04-16T18:00:00Z,Monthly property P&L,2026-04-24T09:17:18Z
+silver_gl_transactions,MATERIALIZED_VIEW,DELTA,demo.owner@juniper-square-demo.com,2026-04-16T18:00:00Z,Cleaned GL fact with liquid clustering,2026-04-24T09:15:47Z
+bronze_arenas,STREAMING_TABLE,DELTA,demo.owner@juniper-square-demo.com,2026-04-16T18:00:00Z,Raw arena ingest,2026-04-24T09:12:03Z
+bronze_gl_transactions,STREAMING_TABLE,DELTA,demo.owner@juniper-square-demo.com,2026-04-16T18:00:00Z,Raw GL ingest from Auto Loader,2026-04-24T09:12:47Z
+silver_investors,STREAMING_TABLE,DELTA,demo.owner@juniper-square-demo.com,2026-04-16T18:00:00Z,Cleaned investor dimension,2026-04-24T09:14:11Z
+benchmark_summary,MANAGED,DELTA,demo.owner@juniper-square-demo.com,2026-04-23T20:43:58Z,Benchmark p50/p95/p99 per target+concurrency+query,2026-04-23T21:21:01Z
+benchmark_raw,MANAGED,DELTA,demo.owner@juniper-square-demo.com,2026-04-23T20:43:58Z,Per-query latency samples,2026-04-23T21:21:01Z

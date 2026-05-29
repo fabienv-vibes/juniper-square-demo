@@ -24,7 +24,25 @@ SCHEMA = os.environ.get("DATABRICKS_SCHEMA", "pipeline")
 WAREHOUSE_ID = os.environ.get("DATABRICKS_WAREHOUSE_ID", "133b52f9331b883d")
 HTTP_PATH = f"/sql/1.0/warehouses/{WAREHOUSE_ID}"
 
+# When STATIC_MODE=true, every helper returns mock_data CSVs and skips the
+# Databricks connection entirely. Used for the public Streamlit Cloud deploy
+# where there's no service principal or warehouse access.
+STATIC_MODE = os.environ.get("STATIC_MODE", "false").lower() in ("true", "1", "yes")
+
 MOCK_DIR = Path(__file__).resolve().parent.parent / "mock_data"
+
+
+def _static_result(name: str, sql_text: str) -> "QueryResult":
+    """Build a QueryResult from a mock CSV without flagging preview_mode.
+
+    In STATIC_MODE the CSV IS the source of truth, so we want charts and tables
+    to render normally without a "preview banner" warning.
+    """
+    return QueryResult(
+        df=_mock_csv(name),
+        preview_mode=False,
+        sql=sql_text,
+    )
 
 
 @dataclass
@@ -93,7 +111,13 @@ def _oauth_m2m(host, client_id, client_secret):
 
 
 def _run_sql(sql_text: str) -> Tuple[Optional[pd.DataFrame], Optional[str]]:
-    """Return (df, error_message). df is None if the query failed."""
+    """Return (df, error_message). df is None if the query failed.
+
+    In STATIC_MODE, short-circuits before any Databricks connection attempt
+    so the public Streamlit Cloud deploy never tries to import or auth.
+    """
+    if STATIC_MODE:
+        return None, None
     conn = _get_connection()
     if conn is None:
         return None, "no-connection"
@@ -157,7 +181,7 @@ def get_benchmark_summary() -> QueryResult:
     if df is None or df.empty:
         return QueryResult(
             df=_mock_csv("benchmark_summary"),
-            preview_mode=True,
+            preview_mode=not STATIC_MODE,
             error=err,
             sql=sql_text,
         )
@@ -185,7 +209,7 @@ def get_benchmark_raw() -> QueryResult:
     if df is None or df.empty:
         return QueryResult(
             df=_mock_csv("benchmark_raw"),
-            preview_mode=True,
+            preview_mode=not STATIC_MODE,
             error=err,
             sql=sql_text,
         )
@@ -255,7 +279,7 @@ def get_sustained_runs() -> QueryResult:
     if df is None or df.empty:
         return QueryResult(
             df=_mock_csv("sustained_runs"),
-            preview_mode=True,
+            preview_mode=not STATIC_MODE,
             error=err,
             sql=sql_text,
         )
@@ -296,7 +320,7 @@ def get_timeseries_buckets(run_id: Optional[str] = None) -> QueryResult:
     if df is None or df.empty:
         return QueryResult(
             df=_mock_csv("timeseries_buckets"),
-            preview_mode=True,
+            preview_mode=not STATIC_MODE,
             error=err,
             sql=sql_text,
         )
@@ -330,7 +354,7 @@ def get_latency_cdf(run_id: Optional[str] = None) -> QueryResult:
     if df is None or df.empty:
         return QueryResult(
             df=_mock_csv("latency_cdf"),
-            preview_mode=True,
+            preview_mode=not STATIC_MODE,
             error=err,
             sql=sql_text,
         )
@@ -394,7 +418,7 @@ def get_warmup_data(run_id: Optional[str] = None) -> QueryResult:
     if df is None or df.empty:
         return QueryResult(
             df=_mock_csv("warmup_data"),
-            preview_mode=True,
+            preview_mode=not STATIC_MODE,
             error=err,
             sql=sql_text,
         )
@@ -432,7 +456,7 @@ def get_lakeflow_pipelines() -> QueryResult:
     if df is None or df.empty:
         return QueryResult(
             df=_mock_csv("lakeflow_pipelines"),
-            preview_mode=True,
+            preview_mode=not STATIC_MODE,
             error=err,
             sql=sql_text,
         )
@@ -510,7 +534,7 @@ def get_security_grants_variety() -> QueryResult:
     if df is None or df.empty:
         return QueryResult(
             df=_mock_csv("security_grants_variety"),
-            preview_mode=True,
+            preview_mode=not STATIC_MODE,
             error=err,
             sql=sql_text,
         )
@@ -549,7 +573,7 @@ SELECT
     if df is None or df.empty:
         return QueryResult(
             df=_mock_csv("demo_table_stats"),
-            preview_mode=True,
+            preview_mode=not STATIC_MODE,
             error=err,
             sql=sql_text,
         )
@@ -563,7 +587,7 @@ def describe_table_extended(table: str) -> QueryResult:
     if df is None or df.empty:
         return QueryResult(
             df=_mock_csv("describe_extended"),
-            preview_mode=True,
+            preview_mode=not STATIC_MODE,
             error=err,
             sql=sql_text,
         )
@@ -606,7 +630,7 @@ def get_table_metadata() -> QueryResult:
     if df is None or df.empty:
         return QueryResult(
             df=_mock_csv("table_metadata"),
-            preview_mode=True,
+            preview_mode=not STATIC_MODE,
             error=err,
             sql=sql_text,
         )
@@ -649,7 +673,7 @@ def get_table_tags_live() -> QueryResult:
     if df is None or df.empty:
         return QueryResult(
             df=_mock_csv("table_tags_live"),
-            preview_mode=True,
+            preview_mode=not STATIC_MODE,
             error=err,
             sql=sql_text,
         )
@@ -674,7 +698,7 @@ def get_table_history(table: str, limit: int = 20) -> QueryResult:
     if df is None or df.empty:
         return QueryResult(
             df=_mock_csv("table_history"),
-            preview_mode=True,
+            preview_mode=not STATIC_MODE,
             error=err,
             sql=sql_text,
         )
@@ -745,7 +769,7 @@ def get_q8_headline() -> QueryResult:
     if df is None or df.empty:
         return QueryResult(
             df=_mock_csv("q8_headline"),
-            preview_mode=True,
+            preview_mode=not STATIC_MODE,
             error=err,
             sql=sql_text,
         )
@@ -801,15 +825,16 @@ def get_q8_samples() -> QueryResult:
     """
     df, err = _run_sql(sql_text)
     if df is None or df.empty:
+        mock = _mock_csv("q8_samples")
+        if mock.empty:
+            mock = pd.DataFrame(columns=[
+                "query_name", "target_rate_qps", "latency_ms",
+                "queue_time_ms", "total_latency_ms",
+                "scheduled_arrival_offset_ms", "actual_start_offset_ms",
+            ])
         return QueryResult(
-            df=pd.DataFrame(
-                columns=[
-                    "query_name", "target_rate_qps", "latency_ms",
-                    "queue_time_ms", "total_latency_ms",
-                    "scheduled_arrival_offset_ms", "actual_start_offset_ms",
-                ]
-            ),
-            preview_mode=True,
+            df=mock,
+            preview_mode=not STATIC_MODE,
             error=err,
             sql=sql_text,
         )
